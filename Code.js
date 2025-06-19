@@ -127,7 +127,20 @@ function createSystem() {
     }
 }
 
-
+// 遞迴取得所有 PDF 檔案
+function getAllPDFFiles(folder, filesArr) {
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+        var file = files.next();
+        if (file.getName().match(/\.pdf$/i)) {
+            filesArr.push(file);
+        }
+    }
+    var subfolders = folder.getFolders();
+    while (subfolders.hasNext()) {
+        getAllPDFFiles(subfolders.next(), filesArr);
+    }
+}
 /**
 * Reads the spreadsheet data and creates the PDF invoice
 */
@@ -169,11 +182,11 @@ function sendInvoice() {
         var clientNameIndex = dataHeader.indexOf("client_name");
         var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
         var dateIndex = dataHeader.indexOf("invoice date");
-        var invoiceNumIndex = dataHeader.indexOf("Invoice Number");
+        // 不再讀取 Invoice Number 欄位
 
         if (dataCompanyNameIndex === -1) throw new Error("The 'Data' sheet must contain a '公司名稱' column.");
         if (dateIndex === -1) throw new Error("The 'Data' sheet must contain a 'date' column.");
-        if (invoiceNumIndex === -1) throw new Error("The 'Data' sheet must contain an 'Invoice Number' column.");
+        // 不再檢查 Invoice Number 欄位
 
         var key, values, pdfName, invoiceNumber, invoiceDateStr;
 
@@ -197,12 +210,24 @@ function sendInvoice() {
             rootInvoicesFolder = invoiceFolder.createFolder('Invoices');
         }
 
-        // 先建立所有已存在的發票號碼快取（避免本次產生的號碼互相影響）
-        var invoiceNumberCache = {};
-        for (var r = 1; r < sheetValues.length; r++) {
-            var existingInvoiceNum = sheetValues[r][invoiceNumIndex];
-            if (typeof existingInvoiceNum === "string" && existingInvoiceNum.length >= 11) {
-                invoiceNumberCache[r] = existingInvoiceNum;
+        // 掃描所有 PDF 檔名，建立最大流水號表與已用號碼表
+        var allPDFFiles = [];
+        getAllPDFFiles(rootInvoicesFolder, allPDFFiles);
+        var maxCounterMap = {};
+        for (var idx = 0; idx < allPDFFiles.length; idx++) {
+            var file = allPDFFiles[idx];
+            var name = file.getName();
+            var match = name.match(/(\d{8}\d{3})\.pdf$/);
+            if (match) {
+                var num = match[1];
+                // 轉為 yyyymmdd
+                var yyyymmdd = num.substring(0, 8);
+                var counter = parseInt(num.substring(8), 10);
+                if (!isNaN(counter)) {
+                    if (!maxCounterMap[yyyymmdd] || counter > maxCounterMap[yyyymmdd]) {
+                        maxCounterMap[yyyymmdd] = counter;
+                    }
+                }
             }
         }
 
@@ -212,11 +237,6 @@ function sendInvoice() {
             var companySettings = settingsMap[currentCompanyName];
 
             if (!rowData[pdfIndex] && companySettings) {
-                // DEBUG: 印出目前所有行的 Invoice Number 欄位
-                for (var dbg = 1; dbg < sheetValues.length; dbg++) {
-                    console.log("DEBUG: Before Row", dbg + 1, "InvoiceNumCol:", sheetValues[dbg][invoiceNumIndex], "cache:", invoiceNumberCache[dbg]);
-                }
-
                 // 檢查 Template URL 是否已設定
                 if (!companySettings.templateId) {
                     showUiDialog("錯誤", "公司「" + currentCompanyName + "」的 Template URL 尚未設定，請先於 Settings 工作表補齊。");
@@ -248,52 +268,20 @@ function sendInvoice() {
                     showUiDialog("Skipping Row " + (i + 1), "Invalid date found.");
                     continue;
                 }
-                var dateFormatted = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "ddMMyyyy");
-                
-                var dailyCounter = 1;
-                for (var r = 1; r < sheetValues.length; r++) {
-                    var existingInvoiceNum = sheetValues[r][invoiceNumIndex];
-                    if (typeof existingInvoiceNum === "string" && existingInvoiceNum.startsWith(dateFormatted)) {
-                        var existingCounter = parseInt(existingInvoiceNum.substring(8), 10);
-                        if (existingCounter >= dailyCounter) {
-                            dailyCounter = existingCounter + 1;
-                        }
-                    }
-                }
-                
-                invoiceNumber = dateFormatted + dailyCounter.padLeft(3, '0');
+                // 產生 yyyymmdd key
+                var yyyymmddKey = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyyMMdd");
+                // 取得本次日期的最大流水號
+                var maxCounter = maxCounterMap[yyyymmddKey] || 0;
+                maxCounter++;
+                maxCounterMap[yyyymmddKey] = maxCounter;
+                // 產生 yyyymmdd+三位數流水號
+                var invoiceNumber = yyyymmddKey + maxCounter.padLeft(3, '0'); // 產生 yyyymmddNNN 格式
+                var dateFormatted = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+                console.log("DEBUG: Row", i + 1, "date:", dateFormatted, "invoiceNumber:", invoiceNumber, "yyyymmddKey:", yyyymmddKey, "maxCounterMap:", JSON.stringify(maxCounterMap));
 
                 var docId = companySettings.templateId;
                 var invoiceId = DriveApp.getFileById(docId).makeCopy('Template Copy ' + new Date().getTime()).getId();
                 var docBody = DocumentApp.openById(invoiceId).getBody();
-
-                // 重新計算當天最大流水號，僅根據原始快取內容判斷
-                var maxCounter = 0;
-                for (var r = 1; r < sheetValues.length; r++) {
-                    if (r === i) continue; // 跳過自己
-                    // 先用快取，若無則直接讀取資料表內容
-                    var existingInvoiceNum = invoiceNumberCache[r];
-                    if (!existingInvoiceNum) {
-                        existingInvoiceNum = sheetValues[r][invoiceNumIndex];
-                        console.log("DEBUG: Fallback Row", r + 1, "InvoiceNumCol:", existingInvoiceNum);
-                    }
-                    console.log("DEBUG: Compare Row", r + 1, "InvoiceNum:", existingInvoiceNum, "dateFormatted:", dateFormatted);
-                    if (existingInvoiceNum && String(existingInvoiceNum).startsWith(dateFormatted)) {
-                        var existingCounter = parseInt(String(existingInvoiceNum).substring(8), 10);
-                        console.log("DEBUG: Row", r + 1, "InvoiceNum:", existingInvoiceNum, "Counter:", existingCounter);
-                        if (!isNaN(existingCounter) && existingCounter > maxCounter) {
-                            maxCounter = existingCounter;
-                        } else {
-                            console.log("DEBUG: Row", r + 1, "符合日期但流水號無效或較小，existingCounter:", existingCounter, "maxCounter:", maxCounter);
-                        }
-                    }
-                }
-                var nextCounter = maxCounter + 1;
-                invoiceNumber = dateFormatted + nextCounter.toString().padStart(3, "0");
-                console.log("DEBUG: Row", i + 1, "date:", dateFormatted, "nextCounter:", nextCounter, "invoiceNumber:", invoiceNumber, "cache:", JSON.stringify(invoiceNumberCache));
-                dataSheet.getRange(i + 1, invoiceNumIndex + 1).setValue(invoiceNumber);
-                rowData[invoiceNumIndex] = invoiceNumber;
-                invoiceNumberCache[i] = invoiceNumber; // 寫入快取，避免同批資料重複
 
                 for (var j = 0; j < rowData.length; j++) {
                     key = dataHeader[j].toString();
@@ -314,7 +302,7 @@ function sendInvoice() {
                         replace(`%${key}%`, '', docBody);
                     }
                 }
-                
+
                 replace('%invoice%', invoiceNumber, docBody);
 
                 pdfName = rowData[clientNameIndex] + " " + invoiceNumber;
@@ -416,6 +404,7 @@ function showDialog() {
 */
 function showUiDialog(title, message) {
     try {
+        console.log("DEBUG: showUiDialog called with title:", title, "message:", message);
         var ui = SpreadsheetApp.getUi()
         ui.alert(title, message, ui.ButtonSet.OK)
     } catch (e) {
