@@ -39,12 +39,9 @@ SETTINGS = {
     sheetSettings: "Settings",
 
     // Column Settings
-    col: {
-        templateId: "B1",
-        count: "B2",
-        folderId: "B3",
-        systemCreated: "B4"
-    }
+    // The 'col' object is no longer used in the multi-company architecture.
+    // Settings are now read dynamically from the 'Settings' sheet based on company name.
+    col: {}
 };
 
 /**
@@ -60,8 +57,20 @@ function onOpen() {
 }
 
 /**
-* This function Create system
-*/
+ * [DEPRECATED] This function was used to create a single-company system.
+ * In the new multi-company architecture, this function is no longer compatible.
+ *
+ * To add a new company:
+ * 1. Manually create a Google Drive folder for the new company's invoices.
+ * 2. Manually create a Google Doc template for the new company.
+ * 3. Open the 'Settings' sheet.
+ * 4. Add a new row with the following information:
+ *    - Column A: Company Name (must match the name in the 'Data' sheet)
+ *    - Column B: The ID of the Google Doc template.
+ *    - Column C: The ID of the Google Drive folder.
+ *    - Column D: Initial invoice count (usually 0).
+ *    - Column E: Set to 'TRUE'.
+ */
 function createSystem() {
 
     try {
@@ -132,111 +141,120 @@ function createSystem() {
 * Reads the spreadsheet data and creates the PDF invoice
 */
 function sendInvoice() {
-
     try {
-
-        // Opens the spreadsheet and access the tab containing the data
         var ss = SpreadsheetApp.getActiveSpreadsheet();
         var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
-        var sheetSettings = ss.getSheetByName(SETTINGS.sheetSettings);
+        var settingsSheet = ss.getSheetByName(SETTINGS.sheetSettings);
 
-        // Checks if cell Count exists
-        var count = sheetSettings.getRange(SETTINGS.col.count).getValue();
-        if (!count) {
-            sheetSettings.getRange(SETTINGS.col.count).setValue(0);
+        // --- Simplified Multi-Company Settings Loader ---
+        var settingsData = settingsSheet.getDataRange().getValues();
+        var settingsMap = {};
+        var settingsHeader = settingsData[0];
+        var companyNameColIdx = settingsHeader.indexOf("公司名稱");
+        var templateIdColIdx = settingsHeader.indexOf("Template ID");
+        var folderIdColIdx = settingsHeader.indexOf("Folder ID");
+        var systemCreatedColIdx = settingsHeader.indexOf("System created");
+
+        for (var k = 1; k < settingsData.length; k++) {
+            var companyName = settingsData[k][companyNameColIdx];
+            if (companyName) {
+                settingsMap[companyName] = {
+                    templateId: settingsData[k][templateIdColIdx],
+                    folderId: settingsData[k][folderIdColIdx],
+                    systemCreated: settingsData[k][systemCreatedColIdx]
+                };
+            }
         }
+        // --- End Settings Loader ---
 
-        // Checks function createSystem is run
-        var control = sheetSettings.getRange(SETTINGS.col.systemCreated).getValue();
-        if (!control) {
-            showUiDialog('Warnning', 'Run "Install Solution" in tab Instructions');
-            return;
-        }
-
-        // Gets all values from the instanciated tab
         var sheetValues = dataSheet.getDataRange().getValues();
+        var dataHeader = sheetValues[0];
+        var pdfIndex = dataHeader.indexOf("PDF Url");
+        var clientNameIndex = dataHeader.indexOf("client_name");
+        var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
+        var dateIndex = dataHeader.indexOf("date");
+        var invoiceNumIndex = dataHeader.indexOf("Invoice Number");
 
-        // Gets the PDF url column index
-        var pdfIndex = sheetValues[0].indexOf("PDF Url");
+        if (dataCompanyNameIndex === -1) throw new Error("The 'Data' sheet must contain a '公司名稱' column.");
+        if (dateIndex === -1) throw new Error("The 'Data' sheet must contain a 'date' column.");
+        if (invoiceNumIndex === -1) throw new Error("The 'Data' sheet must contain an 'Invoice Number' column.");
 
-        // Gets the user's name (will be used as the PDF file name)
-        var clientNameIndex = sheetValues[0].indexOf("client_name");
-
-        var counter, invoiceNumCount, pdfInvoice, invoiceId, key, values, pdfName, invoiceNumber, invoiceDate;
-
-        // Duplicate teh template on Google Drive to manipulate the data
-        var docId = sheetSettings.getRange(SETTINGS.col.templateId).getValue();
+        var key, values, pdfName, invoiceNumber, invoiceDateStr;
 
         for (var i = 1; i < sheetValues.length; i++) {
+            var rowData = sheetValues[i];
+            var currentCompanyName = rowData[dataCompanyNameIndex];
+            var companySettings = settingsMap[currentCompanyName];
 
-            // Creates the Invoice
-            if (!sheetValues[i][pdfIndex]) {
+            // Skip if PDF URL already exists, or if company settings are invalid
+            if (!rowData[pdfIndex] && companySettings && companySettings.systemCreated === true) {
 
-                // Copy tamplate document
-                var invoiceId = DriveApp.getFileById(docId).makeCopy('Template Copy').getId();
-
-                // Instantiate the document
-                var docBody = DocumentApp.openById(invoiceId).getBody();
-
-                // Iterates over the spreadsheet columns to get the values used to write the document
-                for (var j = 0; j < sheetValues[i].length; j++) {
-
-                    // Key and Values to be replaced
-                    key = sheetValues[0][j];
-                    values = sheetValues[i][j];
-
-                    if (key === "date") {
-
-                        // Invoice Date
-                        invoiceDate = (values.getMonth() + 1) + "/" + values.getDate() + "/" + values.getFullYear();
-                        replace('%date%', invoiceDate, docBody);    // Write data
-
-                    } else if (values) {
-
-                        // Everything else appart from date values
-                        if (key.indexOf("price") > -1 || key === "discount" || key.indexOf("total") > -1) {
-                            replace('%' + key + '%', '$' + values.toFixed(2), docBody); // Replace values
-                        } else if (key === "tax_id") {
-                            replace('%' + key + '%', "Tax ID: " + values, docBody); // Replace the tax_id
-                        } else {
-                            replace('%' + key + '%', values, docBody)
+                // --- New Robust Invoice Number Logic ---
+                var invoiceDate = new Date(rowData[dateIndex]);
+                if (!invoiceDate || isNaN(invoiceDate)) {
+                    showUiDialog("Skipping Row " + (i + 1), "Invalid date found.");
+                    continue; // Skip row if date is invalid
+                }
+                var dateFormatted = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "ddMMyyyy");
+                
+                var dailyCounter = 1;
+                // Scan all existing invoice numbers for the same date to find the next sequence
+                for (var r = 1; r < sheetValues.length; r++) {
+                    var existingInvoiceNum = sheetValues[r][invoiceNumIndex];
+                    if (existingInvoiceNum && existingInvoiceNum.startsWith(dateFormatted)) {
+                        var existingCounter = parseInt(existingInvoiceNum.substring(8), 10);
+                        if (existingCounter >= dailyCounter) {
+                            dailyCounter = existingCounter + 1;
                         }
-
-                    } else {
-                        replace('%' + key + '%', '', docBody) // Replace empty string
                     }
                 }
+                
+                invoiceNumber = dateFormatted + dailyCounter.padLeft(3, '0');
+                // --- End New Logic ---
 
-                // Get last invoice count from the tab 'Count'
-                counter = sheetSettings.getRange(SETTINGS.col.count);
-                invoiceNumCount = counter.getValue() + 1;
+                var docId = companySettings.templateId;
+                var invoiceId = DriveApp.getFileById(docId).makeCopy('Template Copy ' + new Date().getTime()).getId();
+                var docBody = DocumentApp.openById(invoiceId).getBody();
 
-                // Format invoice name pdf
-                invoiceNumber = invoiceNumCount.padLeft(4, '0') + "/" + invoiceDate.split("/")[2];
-                replace('%number%', invoiceNumber, docBody);
+                // Update the generated invoice number in the sheet *before* processing
+                // This prevents race conditions and ensures the number is reserved
+                dataSheet.getRange(i + 1, invoiceNumIndex + 1).setValue(invoiceNumber);
+                rowData[invoiceNumIndex] = invoiceNumber; // Update in-memory array as well
 
-                // Rename the invoice document
-                pdfName = sheetValues[i][clientNameIndex] + " " + invoiceNumber;
+                for (var j = 0; j < rowData.length; j++) {
+                    key = dataHeader[j].toString();
+                    values = rowData[j];
+
+                    if (key.indexOf("date") > -1 && values) {
+                        invoiceDateStr = (values.getMonth() + 1) + "/" + values.getDate() + "/" + values.getFullYear();
+                        replace(`%${key}%`, invoiceDateStr, docBody);
+                    } else if (values) {
+                        if (key.indexOf("price") > -1 || key === "discount" || key.indexOf("total") > -1) {
+                            replace(`%${key}%`, `$${values.toFixed(2)}`, docBody);
+                        } else if (key === "tax_id") {
+                            replace(`%${key}%`, `Tax ID: ${values}`, docBody);
+                        } else {
+                            replace(`%${key}%`, values, docBody);
+                        }
+                    } else {
+                        replace(`%${key}%`, '', docBody);
+                    }
+                }
+                
+                replace('%invoice%', invoiceNumber, docBody);
+
+                pdfName = rowData[clientNameIndex] + " " + invoiceNumber;
                 DocumentApp.openById(invoiceId).setName(pdfName).saveAndClose();
 
-                // Convert the Invoice Document into a PDF file
-                pdfInvoice = convertPDF(invoiceId);
-
-                // Set the PDF url into the spreadsheet
+                var pdfInvoice = convertPDF(invoiceId, companySettings.folderId);
                 dataSheet.getRange(i + 1, pdfIndex + 1).setValue(pdfInvoice[0]);
 
-                // Update invoice counter
-                counter.setValue(invoiceNumCount);
-
-                // Delete the original document (will leave only the PDF)
                 Drive.Files.remove(invoiceId);
             }
         }
+        showUiDialog('Success', 'Invoice generation process completed.');
     } catch (e) {
-
-        // Show the error
-        showUiDialog('Something went wrong', e.message)
-
+        showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
     }
 }
 
@@ -271,16 +289,17 @@ function moveFile(file, dest_folder, isFolder) {
 * @param {string} id - File Id
 * @returns {*[]}
 */
-function convertPDF(id) {
-    var ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SETTINGS.sheetSettings);
+function convertPDF(id, folderId) {
+    if (!folderId) {
+        throw new Error("Folder ID is missing. Cannot convert PDF.");
+    }
     var doc = DocumentApp.openById(id);
-    var docBlob = DocumentApp.openById(id).getAs('application/pdf');
+    var docBlob = doc.getAs('application/pdf');
     docBlob.setName(doc.getName() + ".pdf"); // Add the PDF extension
-    var invFolder = ss.getRange(SETTINGS.col.folderId).getValue();
-    var file = DriveApp.getFolderById(invFolder).createFile(docBlob);
+    var file = DriveApp.getFolderById(folderId).createFile(docBlob);
     var url = file.getUrl();
-    id = file.getId();
-    return [url, id];
+    var fileId = file.getId();
+    return [url, fileId];
 }
 
 /**
