@@ -33,7 +33,7 @@ SETTINGS = {
 
     //Set name document
     documentName: 'Invoice Template',
-
+    pdfFileHead: '客戶平台',
     // Sheet Settings
     sheetSettings: "Settings",
 
@@ -179,7 +179,7 @@ function sendInvoice() {
         var sheetValues = dataSheet.getDataRange().getValues();
         var dataHeader = sheetValues[0];
         var pdfIndex = dataHeader.indexOf("PDF Url");
-        var clientNameIndex = dataHeader.indexOf("client_name");
+        var pdfHeadNameIndex = dataHeader.indexOf(SETTINGS.pdfFileHead);
         var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
         var dateIndex = dataHeader.indexOf("invoice date");
         // 不再讀取 Invoice Number 欄位
@@ -305,7 +305,7 @@ function sendInvoice() {
 
                 replace('%invoice%', invoiceNumber, docBody);
 
-                pdfName = rowData[clientNameIndex] + " " + invoiceNumber;
+                pdfName = rowData[pdfHeadNameIndex] + " " + invoiceNumber;
                 DocumentApp.openById(invoiceId).setName(pdfName).saveAndClose();
 
                 var pdfInvoice = convertPDF(invoiceId, targetFolderId); // Use the determined Folder URL
