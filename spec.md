@@ -181,3 +181,57 @@ sequenceDiagram
 *   **Document Service (`DocumentApp`)**: 用於開啟、編輯和操作 Google Docs 內容。
 *   **HTML Service (`HtmlService`)**: 用於建立簡單的 HTML 使用者介面 (對話方塊)。
 *   **Advanced Drive Service (`Drive`)**: 使用進階 API (`Drive.Files.remove`) 來刪除檔案，需要在使用前在專案中啟用。
+## 6. 新增功能規劃：郵件寄送
+
+根據最新需求，系統將新增獨立的郵件寄送功能，並對現有功能進行重構，以提高模組化和可維護性。
+
+### 6.1. 現有功能重構
+
+*   **函式更名**: 為了更精確地反映其功能，`sendInvoice()` 函式將更名為 `generateInvoice()`。此函式專注於產生 PDF 發票。
+*   **UI 選單更新**: `onOpen()` 中的 "Generate Invoices" 選單項目將對應到新的 `generateInvoice()` 函式。
+
+### 6.2. 新增 `sendEmail()` 功能
+
+此功能將獨立於 PDF 產生，專門負責郵件的寄送。
+
+#### 資料表設定
+
+*   **`Settings` 工作表**:
+    *   新增 `Email Template URL` 欄位：用於存放郵件範本的 Google Doc 網址。
+    *   新增 `Email Subject` 欄位：用於設定郵件主旨。
+    *   新增 `收件人欄位名稱` 欄位：用於指定 `Data` 工作表中哪一欄是收件人的 Email 地址。
+*   **`Data` 工作表**:
+    *   新增 `Email Sent Status` 欄位：用於記錄郵件寄送狀態（成功寄送後填入寄送時間）。
+    *   新增 `客戶信箱` 欄位（或由 `收件人欄位名稱` 指定的欄位）：存放收件人 Email。
+
+#### 核心邏輯
+
+1.  **觸發條件**: 使用者透過 UI 選單中的 "Send Emails" 觸發 `sendEmail()` 函式。
+2.  **執行條件**: 函式會遍歷 `Data` 工作表，只有當一筆資料同時滿足以下兩個條件時，才會執行郵件寄送：
+    *   該行的 `PDF Url` 欄位 **有值**。
+    *   該行的 `Email Sent Status` 欄位 **為空**。
+3.  **郵件產生**:
+    *   使用 `Settings` 中指定的 `Email Template URL` 複製一份臨時 Google Doc。
+    *   將資料填入臨時文件。
+    *   透過 `getHtmlFromDoc()` 輔助函式將文件內容轉換為 HTML。
+4.  **郵件寄送**:
+    *   使用 `MailApp.sendEmail()` 服務寄送郵件。
+    *   成功後，在 `Email Sent Status` 欄位填入當前的日期與時間。
+
+#### `sendEmail()` 函式流程圖
+
+```mermaid
+graph TD
+    A[開始 sendEmail] --> B[讀取 Settings 和 Data 工作表];
+    B --> C[迴圈處理 Data 中的每一列];
+    C --> D{PDF Url 是否有值?};
+    D --否--> C;
+    D --是--> E{Email Sent Status 是否為空?};
+    E --否--> C;
+    E --是--> F[取得 Email 範本並填入資料];
+    F --> G[將範本轉為 HTML];
+    G --> H[寄送郵件];
+    H --> I[在 'Email Sent Status' 欄位填入寄送時間];
+    I --> C;
+    C --> J[結束];
+```

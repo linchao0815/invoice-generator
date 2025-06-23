@@ -12,6 +12,7 @@ Changelog:
 
 1.0.0  Initial release
 1.1.0  Auto configuration
+1.2.0  linchao: 修改規格可以支援多個樣版,settings修改規格
 *================================================================================================================*/
 
 /**
@@ -33,7 +34,11 @@ SETTINGS = {
 
     //Set name document
     documentName: 'Invoice Template',
+    pdfColName: 'PDF Url',
     pdfFileHead: '客戶平台',
+    attFileColName: 'Attachment Url',
+    emailRecipientColName: 'client_email',
+    emailSubjectColName: 'email_subject',
     // Sheet Settings
     sheetSettings: "Settings",
 
@@ -51,7 +56,8 @@ function onOpen() {
     // Adds a custom menu to the spreadsheet.
     SpreadsheetApp.getUi()
         .createMenu('Invoice Generator')
-        .addItem('Generate Invoices', 'sendInvoice')
+        .addItem('Generate Invoices', 'generateInvoice')
+        .addItem('Send Emails', 'sendEmail')
         .addToUi();
 }
 
@@ -144,7 +150,7 @@ function getAllPDFFiles(folder, filesArr) {
 /**
 * Reads the spreadsheet data and creates the PDF invoice
 */
-function sendInvoice() {
+function generateInvoice() {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
         var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
@@ -178,7 +184,7 @@ function sendInvoice() {
 
         var sheetValues = dataSheet.getDataRange().getValues();
         var dataHeader = sheetValues[0];
-        var pdfIndex = dataHeader.indexOf("PDF Url");
+        var pdfIndex = dataHeader.indexOf(SETTINGS.pdfColName);
         var pdfHeadNameIndex = dataHeader.indexOf(SETTINGS.pdfFileHead);
         var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
         var dateIndex = dataHeader.indexOf("invoice date");
@@ -318,6 +324,154 @@ function sendInvoice() {
     } catch (e) {
         showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
     }
+}
+
+// 依據規格新增 sendEmail 功能
+function sendEmail() {
+    try {
+        var ss = SpreadsheetApp.getActiveSpreadsheet();
+        var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
+        var settingsSheet = ss.getSheetByName(SETTINGS.sheetSettings);
+
+        // 載入 Settings
+        var settingsData = settingsSheet.getDataRange().getValues();
+        var settingsHeader = settingsData[0];
+        var companyNameColIdx = settingsHeader.indexOf("公司名稱");
+        var emailTemplateUrlIdx = settingsHeader.indexOf("Email Template URL");
+        var emailSubjectIdx = settingsHeader.indexOf(SETTINGS.emailSubjectColName);
+
+        // 建立公司設定 map
+        var settingsMap = {};
+        for (var k = 1; k < settingsData.length; k++) {
+            var companyName = settingsData[k][companyNameColIdx];
+            if (companyName) {
+                settingsMap[companyName] = {
+                    emailTemplateUrl: settingsData[k][emailTemplateUrlIdx],
+                    emailSubject: settingsData[k][emailSubjectIdx],
+                };
+            }
+        }
+
+        // 讀取 Data
+        var sheetValues = dataSheet.getDataRange().getValues();
+        var dataHeader = sheetValues[0];
+        var pdfIndex = dataHeader.indexOf(SETTINGS.pdfColName);
+        var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
+        var emailSentStatusIndex = dataHeader.indexOf("Email Sent Status");
+        // recipient 來源改為 data 欄位 SETTINGS.emailRecipientColName
+        var recipientColIndex = dataHeader.indexOf(SETTINGS.emailRecipientColName);
+        for (var i = 1; i < sheetValues.length; i++) {
+            var rowData = sheetValues[i];
+            var currentCompanyName = rowData[dataCompanyNameIndex];
+            var companySettings = settingsMap[currentCompanyName];
+            if (!companySettings) continue;
+
+            var pdfUrl = rowData[pdfIndex];
+            var emailSentStatus = rowData[emailSentStatusIndex];
+            if (pdfUrl && !emailSentStatus && recipientColIndex !== -1) {
+                var recipientRaw = rowData[recipientColIndex];
+                // 支援多位收件人，允許逗號或分號分隔
+                var recipient = recipientRaw ? recipientRaw.replace(/;/g, ',') : '';
+                var emailTemplateUrl = companySettings.emailTemplateUrl;
+                // 主旨來源改為 settingsSheet 的 emailSubject 欄位
+                var emailSubjectRaw = companySettings.emailSubject || "Invoice";
+                if (!emailTemplateUrl || !recipient) continue;
+
+                // 取得 Email Template 的 ID
+                var templateIdMatch = emailTemplateUrl.match(/[-\w]{25,}/);
+                if (!templateIdMatch) continue;
+                var templateId = templateIdMatch[0];
+
+                // 複製範本並填入資料
+                var emailDocId = DriveApp.getFileById(templateId).makeCopy('Email Template Copy ' + new Date().getTime()).getId();
+                var docBody = DocumentApp.openById(emailDocId).getBody();
+
+                // 取代佔位符
+                for (var j = 0; j < rowData.length; j++) {
+                    var key = dataHeader[j].toString();
+                    var value = rowData[j];
+                    if (value) {
+                        replace(`%${key}%`, value, docBody);
+                    } else {
+                        replace(`%${key}%`, '', docBody);
+                    }
+                }
+
+                DocumentApp.openById(emailDocId).saveAndClose();
+
+                // 取得 HTML 內容
+                var htmlBody = getHtmlFromDoc(emailDocId);
+
+                // 刪除臨時文件
+                Drive.Files.remove(emailDocId);
+
+                // subject 也支援 %key% 取代
+                // 主旨支援 %key% 取代，與 docBody 一致
+                var emailSubject = emailSubjectRaw;
+                for (var j = 0; j < rowData.length; j++) {
+                    var key = dataHeader[j].toString();
+                    var value = rowData[j] || '';
+                    emailSubject = emailSubject.replace(new RegExp(`%${key}%`, 'g'), value);
+                }
+
+                // 處理附件
+                var attachments = [];
+                var pdfUrl = rowData[pdfIndex];
+                var attFileIndex = dataHeader.indexOf(SETTINGS.attFileColName);
+                var attUrl = attFileIndex !== -1 ? rowData[attFileIndex] : null;
+
+                function extractFileId(url) {
+                    var match = url ? url.match(/[-\w]{25,}/) : null;
+                    return match ? match[0] : null;
+                }
+
+                // PDF 附件
+                var pdfFileId = extractFileId(pdfUrl);
+                if (pdfFileId) {
+                    try {
+                        var pdfFile = DriveApp.getFileById(pdfFileId);
+                        attachments.push(pdfFile.getBlob());
+                    } catch (e) {}
+                }
+                // 其他附件
+                var attFileId = extractFileId(attUrl);
+                if (attFileId) {
+                    try {
+                        var attFile = DriveApp.getFileById(attFileId);
+                        attachments.push(attFile.getBlob());
+                    } catch (e) {}
+                }
+
+                // 寄送郵件
+                MailApp.sendEmail({
+                    to: recipient,
+                    subject: emailSubject,
+                    htmlBody: htmlBody,
+                    attachments: attachments
+                });
+
+                // 寫入寄送時間
+                var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+                dataSheet.getRange(i + 1, emailSentStatusIndex + 1).setValue(now);
+            }
+        }
+        showUiDialog('Success', 'Email sending process completed.');
+    } catch (e) {
+        showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
+    }
+}
+
+// 取得 Google Doc 轉為 HTML 字串
+function getHtmlFromDoc(docId) {
+    var url = "https://docs.google.com/feeds/download/documents/export/Export?id=" + docId + "&exportFormat=html";
+    var token = ScriptApp.getOAuthToken();
+    var response = UrlFetchApp.fetch(url, {
+        headers: {
+            "Authorization": "Bearer " + token
+        },
+        muteHttpExceptions: true
+    });
+    return response.getContentText();
 }
 
 /**
