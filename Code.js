@@ -13,6 +13,7 @@ Changelog:
 1.0.0  Initial release
 1.1.0  Auto configuration
 1.2.0  linchao: 修改規格可以支援多個樣版,settings修改規格
+1.3.0  linchao: 新增寄信功能可以使用google doc做html 樣版
 *================================================================================================================*/
 
 /**
@@ -56,9 +57,16 @@ function onOpen() {
     // Adds a custom menu to the spreadsheet.
     SpreadsheetApp.getUi()
         .createMenu('Invoice Generator')
-        .addItem('Generate Invoices', 'generateInvoice')
+        .addItem('產生發票', 'generateInvoice')
         .addItem('Send Emails', 'sendEmail')
+        .addItem('產生並寄送發票', 'generateAndSendInvoice')
         .addToUi();
+}
+
+// 合併產生與寄送發票
+function generateAndSendInvoice() {
+    generateInvoice(false); // 不顯示對話框
+    sendEmail();
 }
 
 /**
@@ -150,7 +158,7 @@ function getAllPDFFiles(folder, filesArr) {
 /**
 * Reads the spreadsheet data and creates the PDF invoice
 */
-function generateInvoice() {
+function generateInvoice(bShowDialog=true) {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
         var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
@@ -320,7 +328,7 @@ function generateInvoice() {
                 Drive.Files.remove(invoiceId);
             }
         }
-        showUiDialog('Success', 'Invoice generation process completed.');
+        if(bShowDialog)showUiDialog('Success', 'Invoice generation process completed.');
     } catch (e) {
         showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
     }
@@ -402,6 +410,53 @@ function sendEmail() {
                 // 取得 HTML 內容
                 var htmlBody = getHtmlFromDoc(emailDocId);
 
+                // 內嵌圖片：將 <img src="https://..."> 轉為 cid 並準備 inlineImages
+                var inlineImages = {};
+                var cidIndex = 1;
+                htmlBody = htmlBody.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, function(match, src) {
+                    try {
+                        var imgResponse = UrlFetchApp.fetch(src, {headers: {"Authorization": "Bearer " + ScriptApp.getOAuthToken()}});
+                        if (imgResponse.getResponseCode() === 200) {
+                            var contentType = imgResponse.getHeaders()['Content-Type'] || 'image/png';
+                            var cid = "img" + (cidIndex++);
+                            inlineImages[cid] = imgResponse.getBlob().setName(cid + "." + contentType.split('/')[1]);
+                            return match.replace(src, "cid:" + cid);
+                        }
+                    } catch (e) {}
+                    return match;
+                });
+// 移除 Google Docs 轉出 HTML 的全域 padding/margin/max-width
+                htmlBody = htmlBody
+                    .replace(/(padding|margin|background|max-width)\s*:\s*[^;"]+;?/gi, '')
+                    .replace(/<body[^>]*>/i, '<body style="padding:0;margin:0;background:none;max-width:none;">')
+                    // 修正 img 標籤
+                    .replace(/<img([^>]*)>/gi, function(match, attrs) {
+                        var newAttrs = attrs
+                            .replace(/\s*border\s*=\s*["'][^"']*["']/gi, '')
+                            .replace(/\s*style\s*=\s*["'][^"']*["']/gi, '');
+                        return '<img' + newAttrs + ' border="0" style="border:none">';
+                    })
+                    // 修正 span 標籤
+                    .replace(/<span([^>]*)>/gi, function(match, attrs) {
+                        var newAttrs = attrs
+                            .replace(/\s*border\s*:\s*[^;"]+;?/gi, '')
+                            .replace(/\s*border\s*=\s*["'][^"']*["']/gi, '')
+                            .replace(/\s*style\s*=\s*["']([^"']*)["']/gi, function(m, style) {
+                                // 移除 style 內 border 設定
+                                var newStyle = style.replace(/border\s*:\s*[^;"]+;?/gi, '');
+                                return newStyle.trim() ? ' style="' + newStyle + '"' : '';
+                            });
+                        // 強制加上 border:0
+                        if (!/style\s*=/.test(newAttrs)) {
+                            newAttrs += ' style="border:0;"';
+                        } else {
+                            newAttrs = newAttrs.replace(/style="([^"]*)"/, function(m, style) {
+                                return 'style="' + style.replace(/border\s*:\s*[^;"]+;?/gi, '') + 'border:0;"';
+                            });
+                        }
+                        return '<span' + newAttrs + '>';
+                    });
+
                 // 刪除臨時文件
                 Drive.Files.remove(emailDocId);
 
@@ -443,15 +498,14 @@ function sendEmail() {
                 }
 
                 // 寄送郵件
-                MailApp.sendEmail({
-                    to: recipient,
-                    subject: emailSubject,
+                GmailApp.sendEmail(recipient, emailSubject, '', {
                     htmlBody: htmlBody,
-                    attachments: attachments
+                    attachments: attachments,
+                    inlineImages: inlineImages
                 });
 
                 // 寫入寄送時間
-                var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+                var now = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
                 dataSheet.getRange(i + 1, emailSentStatusIndex + 1).setValue(now);
             }
         }
@@ -477,7 +531,7 @@ function getHtmlFromDoc(docId) {
 /**
 * Move a file from one folder into another
 * @param {Object} file A file object in Google Drive
-* @param {Object} dest_folder A folder object in Google Drive 
+* @param {Object} dest_folder A folder object in Google Drive
 */
 function moveFile(file, dest_folder, isFolder) {
 
