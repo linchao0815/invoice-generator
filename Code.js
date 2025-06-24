@@ -67,7 +67,7 @@ var msg = {
     'PDF Url': 'https://drive.google.com/file/d/14jElMsj7Q36aKvo1iBhEHrO5sf9C9dTb/view?usp=drivesdk',
     'Attachment Url': '',
     'Email Sent Status': '2025-06-23 16:34:32',
-    'invoice_date': '2025-06-23'
+    'invoice date': '2025-06-23'
 }
 
 function testLog() {
@@ -194,7 +194,7 @@ function createSystem() {
         showUiDialog('Success', 'The main folder structure is ready. You can now add companies to the Settings sheet.');
         return true;
     } catch (e) {
-        showUiDialog('Something went wrong', e.message);
+        showUiDialog('Something went wrong'+ e.message+" Stack Trace: " + e.stack);
     }
 }
 
@@ -395,7 +395,7 @@ function generateInvoice(bShowDialog = true) {
         }
         if (bShowDialog) showUiDialog('Success', 'Invoice generation process completed.');
     } catch (e) {
-        showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
+        showUiDialog('Something went wrong', e.message + "Stack Trace: " + e.stack);
     }
 }
 /**
@@ -707,15 +707,36 @@ function moveFile(file, dest_folder, isFolder) {
 */
 function convertPDF(id, folderId) {
     if (!folderId) {
-        throw new Error("Folder URL is missing. Cannot convert PDF.");
+        throw new Error("Folder ID is missing. Cannot convert PDF.");
     }
-    var doc = DocumentApp.openById(id);
-    var docBlob = doc.getAs('application/pdf');
-    docBlob.setName(doc.getName() + ".pdf"); // Add the PDF extension
-    var file = DriveApp.getFolderById(folderId).createFile(docBlob);
-    var url = file.getUrl();
-    var fileId = file.getId();
-    return [url, fileId];
+
+    try {
+        var doc = DocumentApp.openById(id);
+        var docBlob = doc.getAs('application/pdf');
+        docBlob.setName(doc.getName() + ".pdf");
+        
+        // 偵錯：檢查目標資料夾是否存在且可存取
+        var folder = DriveApp.getFolderById(folderId);
+        Logger.log("Successfully accessed folder: " + folder.getName());
+
+        // 建立檔案
+        var file = folder.createFile(docBlob);
+        var url = file.getUrl();
+        var fileId = file.getId();
+        
+        Logger.log("File created successfully. URL: " + url);
+        return [url, fileId];
+
+    } catch (e) {
+        // 捕獲並記錄詳細錯誤
+        Logger.log("An error occurred: " + e.toString());
+        Logger.log("Error Name: " + e.name);
+        Logger.log("Error Message: " + e.message);
+        Logger.log("Stack Trace: " + e.stack);
+        
+        // 將錯誤訊息拋出，讓呼叫方知道失敗了
+        throw new Error("Failed to create PDF. " + e.toString());
+    }
 }
 
 /**
