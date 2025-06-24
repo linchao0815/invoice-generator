@@ -15,7 +15,64 @@ Changelog:
 1.2.0  linchao: 修改規格可以支援多個樣版,settings修改規格
 1.3.0  linchao: 新增寄信功能可以使用google doc做html 樣版
 *================================================================================================================*/
+let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
+function ElkLog(msg) {
+    let userName = "",domain="";
+    try {
+        let acnt = Session.getActiveUser().getEmail();
+        if (acnt.indexOf('@') > -1) {
+            domain = acnt.split('@')[1];
+            userName = acnt.split('@')[0];
+        }
+    } catch (e) { }
+    let payload = Object.assign({ "app": "invoice", "Domain": domain }, msg);
+    payload["UserName"]=userName;
+    // 遍歷 val 物件的所有屬性
+    for (var key in msg) {
+        // 檢查屬性名稱是否包含 'date' (不區分大小寫)
+        if (key.toLowerCase().includes('date')) {
+            // 嘗試將屬性值轉換為 Date 物件並格式化為 ISO 字串
+            try {
+                // 如果值是有效的日期字串或數字，則轉換
+                if (msg[key] && !isNaN(new Date(msg[key]).getTime())) {
+                    payload[key] = new Date(msg[key]).toISOString();
+                }
+            } catch (e) {
+                // 如果轉換失敗，則在日誌中記錄錯誤，但不要中斷執行
+                Logger.log('Could not convert key "' + key + '" with value "' + msg[key] + '" to ISOString: ' + e.toString());
+            }
+        }
+    }
+    var options = {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+    };
+    var resp = UrlFetchApp.fetch(logUrl, options);
+    Logger.log(`payload: ${JSON.stringify(payload)}, resp: ${resp}`);
+}
 
+var msg = {
+    app: 'invoice',
+    UserName: 'linchao0815@gmail.com',
+    client_email: 'linchao@igs.com.tw,linchao.chang@gmail.com',
+    client_name: 'Alpha Games',
+    '客戶平台': 'Brazino777/ Admiral',
+    '公司名稱': 'FaDa',
+    client_address: 'Capitao Antonio Rosa Street, No. 409 - Jardim Paulistano Neighborhood - Sao Paulo/Sao Paulo\r\n01.443-010\r',
+    DESCRIPTION: '《License Fee》for Jun, 2025',
+    '幣別': 'EUR',
+    total: 123131.23,
+    'PDF Url': 'https://drive.google.com/file/d/14jElMsj7Q36aKvo1iBhEHrO5sf9C9dTb/view?usp=drivesdk',
+    'Attachment Url': '',
+    'Email Sent Status': '2025-06-23 16:34:32',
+    'invoice_date': '2025-06-23'
+}
+
+function testLog() {
+    ElkLog(msg)
+}
 /**
 * Project Settings
 * @type {JSON}
@@ -158,7 +215,7 @@ function getAllPDFFiles(folder, filesArr) {
 /**
 * Reads the spreadsheet data and creates the PDF invoice
 */
-function generateInvoice(bShowDialog=true) {
+function generateInvoice(bShowDialog = true) {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
         var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
@@ -324,14 +381,94 @@ function generateInvoice(bShowDialog=true) {
 
                 var pdfInvoice = convertPDF(invoiceId, targetFolderId); // Use the determined Folder URL
                 dataSheet.getRange(i + 1, pdfIndex + 1).setValue(pdfInvoice[0]);
-
+                rowData[pdfIndex] = pdfInvoice[0]; // 更新 rowData 以便寫入 log
                 Drive.Files.remove(invoiceId);
+                // 印出此列 data 的 JSON 格式 log
+                var rowJson = {};
+                for (var colIdx = 0; colIdx < dataHeader.length; colIdx++) {
+                    rowJson[dataHeader[colIdx]] = rowData[colIdx];
+                }
+                console.log("generateInvoice row data:", JSON.stringify(rowJson));
+                // 寫入 log sheet
+                writeLogSheet('generateInvoice', rowJson);
             }
         }
-        if(bShowDialog)showUiDialog('Success', 'Invoice generation process completed.');
+        if (bShowDialog) showUiDialog('Success', 'Invoice generation process completed.');
     } catch (e) {
         showUiDialog('Something went wrong', e.message + " (Script line: " + e.lineNumber + ")");
     }
+}
+/**
+ * Google Apps Script 版本的 HttpPost
+ * @param {string} url - 目標網址
+ * @param {string} data - POST 的資料（字串，通常為 JSON 或 NDJSON）
+ * @param {Array<string>} headers - HTTP 標頭陣列
+ * @param {number} timeout - 逾時（毫秒）
+ * @return {Object} - {code: 狀態碼, response: 回應內容}
+ */
+function HttpPost(url, data, headers, timeout) {
+    var options = {
+        method: "post",
+        contentType: "application/x-ndjson;charset=UTF-8",
+        payload: data,
+        muteHttpExceptions: true,
+        headers: {},
+        timeoutSeconds: Math.min(Math.ceil(timeout / 1000), 300)
+    };
+
+    if (headers && headers.length) {
+        headers.forEach(function (h) {
+            var idx = h.indexOf(":");
+            if (idx > 0) {
+                var key = h.substring(0, idx).trim();
+                var val = h.substring(idx + 1).trim();
+                options.headers[key] = val;
+            }
+        });
+    }
+
+    var resp = UrlFetchApp.fetch(url, options);
+    return {
+        code: resp.getResponseCode(),
+        response: resp.getContentText()
+    };
+}
+
+// 寫入 log sheet 的共用函式
+function writeLogSheet(source, rowJson) {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logSheet = ss.getSheetByName('log');
+    if (!logSheet) {
+        logSheet = ss.insertSheet('log');
+        var protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
+        protection.removeEditors(protection.getEditors());
+    }
+    var now = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
+    var keys = Object.keys(rowJson);
+    // 若 log sheet 無標題，寫入標題
+    if (logSheet.getLastRow() === 0 || logSheet.getLastColumn() === 0) {
+        logSheet.appendRow(['time', 'source'].concat(keys));
+    }
+    // 取得標題
+    var headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+    var row = [now, source];
+    for (var i = 2; i < headers.length; i++) {
+        row.push(rowJson[headers[i]] || '');
+    }
+    // 解除保護
+    var protections = logSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    var protection = protections.length > 0 ? protections[0] : null;
+    if (protection) protection.remove();
+    logSheet.appendRow(row);
+    rowJson['kind'] = source;
+    ElkLog(rowJson);
+    // 再加回保護
+    if (!protection) {
+        protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
+    } else {
+        protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
+    }
+    protection.removeEditors(protection.getEditors());
 }
 
 // 依據規格新增 sendEmail 功能
@@ -413,35 +550,35 @@ function sendEmail() {
                 // 內嵌圖片：將 <img src="https://..."> 轉為 cid 並準備 inlineImages
                 var inlineImages = {};
                 var cidIndex = 1;
-                htmlBody = htmlBody.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, function(match, src) {
+                htmlBody = htmlBody.replace(/<img[^>]+src="([^"]+)"[^>]*>/g, function (match, src) {
                     try {
-                        var imgResponse = UrlFetchApp.fetch(src, {headers: {"Authorization": "Bearer " + ScriptApp.getOAuthToken()}});
+                        var imgResponse = UrlFetchApp.fetch(src, { headers: { "Authorization": "Bearer " + ScriptApp.getOAuthToken() } });
                         if (imgResponse.getResponseCode() === 200) {
                             var contentType = imgResponse.getHeaders()['Content-Type'] || 'image/png';
                             var cid = "img" + (cidIndex++);
                             inlineImages[cid] = imgResponse.getBlob().setName(cid + "." + contentType.split('/')[1]);
                             return match.replace(src, "cid:" + cid);
                         }
-                    } catch (e) {}
+                    } catch (e) { }
                     return match;
                 });
-// 移除 Google Docs 轉出 HTML 的全域 padding/margin/max-width
+                // 移除 Google Docs 轉出 HTML 的全域 padding/margin/max-width
                 htmlBody = htmlBody
                     .replace(/(padding|margin|background|max-width)\s*:\s*[^;"]+;?/gi, '')
                     .replace(/<body[^>]*>/i, '<body style="padding:0;margin:0;background:none;max-width:none;">')
                     // 修正 img 標籤
-                    .replace(/<img([^>]*)>/gi, function(match, attrs) {
+                    .replace(/<img([^>]*)>/gi, function (match, attrs) {
                         var newAttrs = attrs
                             .replace(/\s*border\s*=\s*["'][^"']*["']/gi, '')
                             .replace(/\s*style\s*=\s*["'][^"']*["']/gi, '');
                         return '<img' + newAttrs + ' border="0" style="border:none">';
                     })
                     // 修正 span 標籤
-                    .replace(/<span([^>]*)>/gi, function(match, attrs) {
+                    .replace(/<span([^>]*)>/gi, function (match, attrs) {
                         var newAttrs = attrs
                             .replace(/\s*border\s*:\s*[^;"]+;?/gi, '')
                             .replace(/\s*border\s*=\s*["'][^"']*["']/gi, '')
-                            .replace(/\s*style\s*=\s*["']([^"']*)["']/gi, function(m, style) {
+                            .replace(/\s*style\s*=\s*["']([^"']*)["']/gi, function (m, style) {
                                 // 移除 style 內 border 設定
                                 var newStyle = style.replace(/border\s*:\s*[^;"]+;?/gi, '');
                                 return newStyle.trim() ? ' style="' + newStyle + '"' : '';
@@ -450,7 +587,7 @@ function sendEmail() {
                         if (!/style\s*=/.test(newAttrs)) {
                             newAttrs += ' style="border:0;"';
                         } else {
-                            newAttrs = newAttrs.replace(/style="([^"]*)"/, function(m, style) {
+                            newAttrs = newAttrs.replace(/style="([^"]*)"/, function (m, style) {
                                 return 'style="' + style.replace(/border\s*:\s*[^;"]+;?/gi, '') + 'border:0;"';
                             });
                         }
@@ -486,7 +623,7 @@ function sendEmail() {
                     try {
                         var pdfFile = DriveApp.getFileById(pdfFileId);
                         attachments.push(pdfFile.getBlob());
-                    } catch (e) {}
+                    } catch (e) { }
                 }
                 // 其他附件
                 var attFileId = extractFileId(attUrl);
@@ -494,7 +631,7 @@ function sendEmail() {
                     try {
                         var attFile = DriveApp.getFileById(attFileId);
                         attachments.push(attFile.getBlob());
-                    } catch (e) {}
+                    } catch (e) { }
                 }
 
                 // 寄送郵件
@@ -507,6 +644,15 @@ function sendEmail() {
                 // 寫入寄送時間
                 var now = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
                 dataSheet.getRange(i + 1, emailSentStatusIndex + 1).setValue(now);
+                rowData[emailSentStatusIndex] = now; // 更新 rowData 以便寫入 log
+                // 印出此列 data 的 JSON 格式 log
+                var rowJson = {};
+                for (var colIdx = 0; colIdx < dataHeader.length; colIdx++) {
+                    rowJson[dataHeader[colIdx]] = rowData[colIdx];
+                }
+                console.log("sendEmail row data:", JSON.stringify(rowJson));
+                // 寫入 log sheet
+                writeLogSheet('sendEmail', rowJson);
             }
         }
         showUiDialog('Success', 'Email sending process completed.');
