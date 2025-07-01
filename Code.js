@@ -14,6 +14,7 @@ Changelog:
 1.1.0  Auto configuration
 1.2.0  linchao: 修改規格可以支援多個樣版,settings修改規格
 1.3.0  linchao: 新增寄信功能可以使用google doc做html 樣版
+1.4.0  linchao: 修正發票號碼改以"公司名稱"目錄下檔案,而不是Invoice Folder全部檔案
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -212,6 +213,24 @@ function getAllPDFFiles(folder, filesArr) {
         getAllPDFFiles(subfolders.next(), filesArr);
     }
 }
+
+// 遞迴取得所有 PDF 檔案，依公司名稱分組
+function getAllPDFFilesByCompany(folder, filesMap) {
+    var folderName = folder.getName();
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+        var file = files.next();
+        if (file.getName().match(/\.pdf$/i)) {
+            if (!filesMap[folderName]) filesMap[folderName] = [];
+            filesMap[folderName].push(file);
+        }
+    }
+    var subfolders = folder.getFolders();
+    while (subfolders.hasNext()) {
+        getAllPDFFilesByCompany(subfolders.next(), filesMap);
+    }
+}
+
 /**
 * Reads the spreadsheet data and creates the PDF invoice
 */
@@ -281,26 +300,30 @@ function generateInvoice(bShowDialog = true) {
             rootInvoicesFolder = invoiceFolder.createFolder('Invoices');
         }
 
-        // 掃描所有 PDF 檔名，建立最大流水號表與已用號碼表
-        var allPDFFiles = [];
-        getAllPDFFiles(rootInvoicesFolder, allPDFFiles);
+        // 掃描所有公司 PDF 檔案，依公司名稱分組
+        var allPDFFilesMap = {};
+        getAllPDFFilesByCompany(rootInvoicesFolder, allPDFFilesMap);
+        // maxCounterMap: { [companyName]: { [yyyymmdd]: maxCounter } }
         var maxCounterMap = {};
-        for (var idx = 0; idx < allPDFFiles.length; idx++) {
-            var file = allPDFFiles[idx];
-            var name = file.getName();
-            var match = name.match(/(\d{8}\d{3})\.pdf$/);
-            if (match) {
-                var num = match[1];
-                // 轉為 yyyymmdd
-                var yyyymmdd = num.substring(0, 8);
-                var counter = parseInt(num.substring(8), 10);
-                if (!isNaN(counter)) {
-                    if (!maxCounterMap[yyyymmdd] || counter > maxCounterMap[yyyymmdd]) {
-                        maxCounterMap[yyyymmdd] = counter;
+        Object.keys(allPDFFilesMap).forEach(function(companyName) {
+            var files = allPDFFilesMap[companyName];
+            maxCounterMap[companyName] = {};
+            for (var idx = 0; idx < files.length; idx++) {
+                var file = files[idx];
+                var name = file.getName();
+                var match = name.match(/(\d{8}\d{3})\.pdf$/);
+                if (match) {
+                    var num = match[1];
+                    var yyyymmdd = num.substring(0, 8);
+                    var counter = parseInt(num.substring(8), 10);
+                    if (!isNaN(counter)) {
+                        if (!maxCounterMap[companyName][yyyymmdd] || counter > maxCounterMap[companyName][yyyymmdd]) {
+                            maxCounterMap[companyName][yyyymmdd] = counter;
+                        }
                     }
                 }
             }
-        }
+        });
 
         for (var i = 1; i < sheetValues.length; i++) {
             var rowData = sheetValues[i];
@@ -341,10 +364,11 @@ function generateInvoice(bShowDialog = true) {
                 }
                 // 產生 yyyymmdd key
                 var yyyymmddKey = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyyMMdd");
-                // 取得本次日期的最大流水號
-                var maxCounter = maxCounterMap[yyyymmddKey] || 0;
+                // 取得本公司本次日期的最大流水號
+                if (!maxCounterMap[currentCompanyName]) maxCounterMap[currentCompanyName] = {};
+                var maxCounter = maxCounterMap[currentCompanyName][yyyymmddKey] || 0;
                 maxCounter++;
-                maxCounterMap[yyyymmddKey] = maxCounter;
+                maxCounterMap[currentCompanyName][yyyymmddKey] = maxCounter;
                 // 產生 yyyymmdd+三位數流水號
                 var invoiceNumber = yyyymmddKey + maxCounter.padLeft(3, '0'); // 產生 yyyymmddNNN 格式
                 var dateFormatted = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
@@ -363,7 +387,7 @@ function generateInvoice(bShowDialog = true) {
                         replace(`%${key}%`, invoiceDateStr, docBody);
                     } else if (values) {
                         if (key.indexOf("price") > -1 || key === "discount" || key.indexOf("total") > -1) {
-                            replace(`%${key}%`, `$${values.toFixed(2)}`, docBody);
+                            replace(`%${key}%`, `${values}`, docBody);
                         } else if (key === "tax_id") {
                             replace(`%${key}%`, `Tax ID: ${values}`, docBody);
                         } else {
