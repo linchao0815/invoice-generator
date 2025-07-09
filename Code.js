@@ -15,6 +15,7 @@ Changelog:
 1.2.0  linchao: 修改規格可以支援多個樣版,settings修改規格
 1.3.0  linchao: 新增寄信功能可以使用google doc做html 樣版
 1.4.0  linchao: 修正發票號碼改以"公司名稱"目錄下檔案,而不是Invoice Folder全部檔案
+1.4.1  linchao: 修正log:"app"->"App"
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -26,7 +27,7 @@ function ElkLog(msg) {
             userName = acnt.split('@')[0];
         }
     } catch (e) { }
-    let payload = Object.assign({ "app": "invoice", "Domain": domain }, msg);
+    let payload = Object.assign({ "App": "invoice", "Domain": domain }, msg);
     payload["UserName"]=userName;
     // 遍歷 val 物件的所有屬性
     for (var key in msg) {
