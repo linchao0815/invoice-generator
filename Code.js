@@ -17,6 +17,7 @@ Changelog:
 1.4.0  linchao: 修正發票號碼改以"公司名稱"目錄下檔案,而不是Invoice Folder全部檔案
 1.4.1  linchao: 修正log:"app"->"App"
 1.4.2  linchao: 補上log缺少欄位,新増"invoice_num"欄位
+1.4.3  linchao: 檢查開立發票時，工作表名稱 yyyy/mm 格式，例如 2025/07 且目前時間大於工作表名稱指定的年/月,超過"關帳期限"。
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -240,6 +241,11 @@ function generateInvoice(bShowDialog = true) {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
         var dataSheet = ss.getActiveSheet(); // 取得目前 active sheet
+        var sheetName = dataSheet.getName();
+        // 檢查名稱格式 yyyy/mm
+        if (!/^\d{4}\/\d{2}$/.test(sheetName)) {
+            throw new Error("目前工作表名稱必須為 yyyy/mm 格式，例如 2025/07。");
+        }
         var settingsSheet = ss.getSheetByName(SETTINGS.sheetSettings);
 
         // --- Multi-Company Settings Loader ---
@@ -365,6 +371,24 @@ function generateInvoice(bShowDialog = true) {
                     showUiDialog("Skipping Row " + (i + 1), "Invalid date found.");
                     continue;
                 }
+                // 檢查 invoiceDate 的年/月是否與 sheetName 相符
+                var invoiceYear = invoiceDate.getFullYear();
+                var invoiceMonth = invoiceDate.getMonth() + 1; // getMonth() 從 0 開始
+                var sheetYearMonth = sheetName.split('/');
+                if (sheetYearMonth.length === 2) {
+                    var now = new Date();
+                    var currentYear = now.getFullYear();
+                    var currentMonth = now.getMonth() + 1;                
+                    var sheetYear = parseInt(sheetYearMonth[0], 10);
+                    var sheetMonth = parseInt(sheetYearMonth[1], 10);
+                    if (invoiceYear !== sheetYear || invoiceMonth !== sheetMonth) {
+                        throw new Error(`Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 年/月 與工作表名稱不符。`);
+                    }
+                    // 若目前年/月 > sheet 年/月 也報錯
+                    if (currentYear > sheetYear || (currentYear === sheetYear && currentMonth > sheetMonth)) {
+                        throw new Error(`Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 目前時間大於工作表名稱:sheetName 指定的年/月,超過"關帳期限"。`);
+                    }
+                }                
                 // 產生 yyyymmdd key
                 var yyyymmddKey = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyyMMdd");
                 // 取得本公司本次日期的最大流水號
@@ -423,7 +447,12 @@ function generateInvoice(bShowDialog = true) {
         }
         if (bShowDialog) showUiDialog('Success', 'Invoice generation process completed.');
     } catch (e) {
-        showUiDialog('Something went wrong', e.message + "Stack Trace: " + e.stack);
+        // 自訂錯誤（你 throw new Error()）都會是 Error 物件
+        if (e instanceof Error && e.stack && e.stack.indexOf('generateInvoice') !== -1) {
+            showUiDialog('錯誤', e.message);
+        } else {
+            showUiDialog('Something went wrong', e.message + "\n" + (e.stack || ""));
+        }
     }
 }
 /**
