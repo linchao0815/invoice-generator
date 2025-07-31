@@ -18,6 +18,7 @@ Changelog:
 1.4.1  linchao: 修正log:"app"->"App"
 1.4.2  linchao: 補上log缺少欄位,新増"invoice_num"欄位
 1.4.3  linchao: 檢查開立發票時，工作表名稱 yyyy/mm 格式，例如 2025/07 且目前時間大於工作表名稱指定的年/月,超過"關帳期限"。
+1.4.4  linchao: 增加"Credit Note"填入需作廢或拆讓的 Invoice_num,需在settings中設定 樣版"CreditNote URL",Invoice同層會建立"Credit Note"相同階層目錄結構。
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -255,6 +256,8 @@ function generateInvoice(bShowDialog = true) {
         var companyNameColIdx = settingsHeader.indexOf("公司名稱");
         var templateIdColIdx = settingsHeader.indexOf("Template URL");
         var folderIdColIdx = settingsHeader.indexOf("Folder URL");
+        var creditNoteTemplateColIdx = settingsHeader.indexOf("CreditNote URL");
+        var creditNoteFolderColIdx = settingsHeader.indexOf("CreditNote Folder URL");
         // 不再處理 System created 欄位
 
         for (var k = 1; k < settingsData.length; k++) {
@@ -263,11 +266,17 @@ function generateInvoice(bShowDialog = true) {
                 // 將 Template URL 與 Folder URL 欄位內容視為 URL，需轉換為 ID
                 var templateUrl = settingsData[k][templateIdColIdx];
                 var folderUrl = settingsData[k][folderIdColIdx];
+                var creditNoteTemplateUrl = settingsData[k][creditNoteTemplateColIdx];
+                var creditNoteFolderUrl = settingsData[k][creditNoteFolderColIdx];
                 var templateId = templateUrl ? (templateUrl.match(/[-\w]{25,}/) || [null])[0] : null;
                 var folderId = folderUrl ? (folderUrl.match(/[-\w]{25,}/) || [null])[0] : null;
+                var creditNoteTemplateId = creditNoteTemplateUrl ? (creditNoteTemplateUrl.match(/[-\w]{25,}/) || [null])[0] : null;
+                var creditNoteFolderId = creditNoteFolderUrl ? (creditNoteFolderUrl.match(/[-\w]{25,}/) || [null])[0] : null;
                 settingsMap[companyName] = {
                     templateId: templateId,
                     folderId: folderId,
+                    creditNoteTemplateId: creditNoteTemplateId,
+                    creditNoteFolderId: creditNoteFolderId,
                     rowIndex: k + 1 // Store row index to write back the new Folder URL
                 };
             }
@@ -281,7 +290,8 @@ function generateInvoice(bShowDialog = true) {
         var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
         var dateIndex = dataHeader.indexOf("invoice date");
         var invoice_numIndex = dataHeader.indexOf("invoice_num");
-        
+        var creditNoteColIdx = dataHeader.indexOf("Credit Note");
+
         if (dataCompanyNameIndex === -1) throw new Error("The 'Data' sheet must contain a '公司名稱' column.");
         if (dateIndex === -1) throw new Error("The 'Data' sheet must contain a 'date' column.");
         // 檢查 Invoice Number 欄位
@@ -299,41 +309,8 @@ function generateInvoice(bShowDialog = true) {
         if (!folderIdMatch) {
             throw new Error('Instructions C15 的 Invoice Folder URL 格式錯誤。');
         }
-        var invoiceFolder = DriveApp.getFolderById(folderIdMatch[0]);
-        // 檢查/建立 Invoices 子目錄
-        var invoicesFolders = invoiceFolder.getFoldersByName('Invoices');
-        var rootInvoicesFolder;
-        if (invoicesFolders.hasNext()) {
-            rootInvoicesFolder = invoicesFolders.next();
-        } else {
-            rootInvoicesFolder = invoiceFolder.createFolder('Invoices');
-        }
-
-        // 掃描所有公司 PDF 檔案，依公司名稱分組
-        var allPDFFilesMap = {};
-        getAllPDFFilesByCompany(rootInvoicesFolder, allPDFFilesMap);
-        // maxCounterMap: { [companyName]: { [yyyymmdd]: maxCounter } }
-        var maxCounterMap = {};
-        Object.keys(allPDFFilesMap).forEach(function(companyName) {
-            var files = allPDFFilesMap[companyName];
-            maxCounterMap[companyName] = {};
-            for (var idx = 0; idx < files.length; idx++) {
-                var file = files[idx];
-                var name = file.getName();
-                var match = name.match(/(\d{8}\d{3})\.pdf$/);
-                if (match) {
-                    var num = match[1];
-                    var yyyymmdd = num.substring(0, 8);
-                    var counter = parseInt(num.substring(8), 10);
-                    if (!isNaN(counter)) {
-                        if (!maxCounterMap[companyName][yyyymmdd] || counter > maxCounterMap[companyName][yyyymmdd]) {
-                            maxCounterMap[companyName][yyyymmdd] = counter;
-                        }
-                    }
-                }
-            }
-        });
-
+        var { rootFolder: rootInvoicesFolder, maxCounterMap: maxInvoicesCounterMap } = getFolderInfo(folderIdMatch, "Invoices");
+        var { rootFolder: rootCreditNoteFolder, maxCounterMap: maxCreditNoteCounterMap } = getFolderInfo(folderIdMatch,"Credit Note");
         for (var i = 1; i < sheetValues.length; i++) {
             var rowData = sheetValues[i];
             var currentCompanyName = rowData[dataCompanyNameIndex];
@@ -345,26 +322,26 @@ function generateInvoice(bShowDialog = true) {
                     showUiDialog("錯誤", "公司「" + currentCompanyName + "」的 Template URL 尚未設定，請先於 Settings 工作表補齊。");
                     continue;
                 }
-
-                // --- Dynamic Folder Creation Logic ---
-                var targetFolderId = companySettings.folderId;
+                var targetFolderId=companySettings.folderId;
+                var targetFolderIdColIdx = folderIdColIdx;
+                var rootHandleFolder=rootInvoicesFolder,maxCounterMap=maxInvoicesCounterMap;
+                var isCreditNote = false;
+                if (creditNoteColIdx !== -1 && rowData[creditNoteColIdx] && rowData[creditNoteColIdx].toString().length > 0) {
+                    rootHandleFolder = rootCreditNoteFolder;
+                    maxCounterMap = maxCreditNoteCounterMap;
+                    isCreditNote = true;
+                    targetFolderId = companySettings.creditNoteFolderId;
+                    targetFolderIdColIdx = creditNoteFolderColIdx;
+                }
                 if (!targetFolderId) {
                     // 先檢查是否已存在同名公司資料夾
-                    var existingFolders = rootInvoicesFolder.getFoldersByName(currentCompanyName);
-                    if (existingFolders.hasNext()) {
-                        var existingFolder = existingFolders.next();
-                        targetFolderId = existingFolder.getId();
+                    targetFolderId = createOrRetrieveFolder(rootHandleFolder, currentCompanyName, targetFolderId, settingsSheet, companySettings, targetFolderIdColIdx);
+                    if(isCreditNote) {
+                        companySettings.creditNoteFolderId = targetFolderId;
                     } else {
-                        var newFolder = rootInvoicesFolder.createFolder(currentCompanyName);
-                        targetFolderId = newFolder.getId();
+                        companySettings.folderId = targetFolderId;
                     }
-                    // Write the ID（不論新建或已存在）回 Settings
-                    // 以網址格式寫回
-                    var folder = DriveApp.getFolderById(targetFolderId);
-                    settingsSheet.getRange(companySettings.rowIndex, folderIdColIdx + 1).setValue(folder.getUrl());
-                    companySettings.folderId = targetFolderId;
                 }
-                // --- End Dynamic Folder Creation ---
 
                 var invoiceDate = new Date(rowData[dateIndex]);
                 if (!invoiceDate || isNaN(invoiceDate)) {
@@ -401,7 +378,7 @@ function generateInvoice(bShowDialog = true) {
                 var dateFormatted = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
                 console.log("DEBUG: Row", i + 1, "date:", dateFormatted, "invoiceNumber:", invoiceNumber, "yyyymmddKey:", yyyymmddKey, "maxCounterMap:", JSON.stringify(maxCounterMap));
 
-                var docId = companySettings.templateId;
+                var docId = isCreditNote ? companySettings.creditNoteTemplateId : companySettings.templateId;
                 var invoiceId = DriveApp.getFileById(docId).makeCopy('Template Copy ' + new Date().getTime()).getId();
                 var docBody = DocumentApp.openById(invoiceId).getBody();
 
@@ -455,6 +432,59 @@ function generateInvoice(bShowDialog = true) {
         }
     }
 }
+function createOrRetrieveFolder(rootHandleFolder, currentCompanyName, targetFolderId, settingsSheet, companySettings, folderIdColIdx) {
+    var existingFolders = rootHandleFolder.getFoldersByName(currentCompanyName);
+    if (existingFolders.hasNext()) {
+        var existingFolder = existingFolders.next();
+        targetFolderId = existingFolder.getId();
+    } else {
+        var newFolder = rootHandleFolder.createFolder(currentCompanyName);
+        targetFolderId = newFolder.getId();
+    }
+    // Write the ID（不論新建或已存在）回 Settings 以網址格式寫回
+    var folder = DriveApp.getFolderById(targetFolderId);
+    settingsSheet.getRange(companySettings.rowIndex, folderIdColIdx + 1).setValue(folder.getUrl());
+    return targetFolderId;
+}
+
+function getFolderInfo(folderIdMatch, folderName) {
+    var folder = DriveApp.getFolderById(folderIdMatch[0]);
+    // 檢查/建立 Invoices 子目錄
+    var folders = folder.getFoldersByName(folderName);
+    var rootFolder;
+    if (folders.hasNext()) {
+        rootFolder = folders.next();
+    } else {
+        rootFolder = folder.createFolder(folderName);
+    }
+
+    // 掃描所有公司 PDF 檔案，依公司名稱分組
+    var allPDFFilesMap = {};
+    getAllPDFFilesByCompany(rootFolder, allPDFFilesMap);
+    // maxCounterMap: { [companyName]: { [yyyymmdd]: maxCounter } }
+    var maxCounterMap = {};
+    Object.keys(allPDFFilesMap).forEach(function (companyName) {
+        var files = allPDFFilesMap[companyName];
+        maxCounterMap[companyName] = {};
+        for (var idx = 0; idx < files.length; idx++) {
+            var file = files[idx];
+            var name = file.getName();
+            var match = name.match(/(\d{8}\d{3})\.pdf$/);
+            if (match) {
+                var num = match[1];
+                var yyyymmdd = num.substring(0, 8);
+                var counter = parseInt(num.substring(8), 10);
+                if (!isNaN(counter)) {
+                    if (!maxCounterMap[companyName][yyyymmdd] || counter > maxCounterMap[companyName][yyyymmdd]) {
+                        maxCounterMap[companyName][yyyymmdd] = counter;
+                    }
+                }
+            }
+        }
+    });
+    return { rootFolder, maxCounterMap };
+}
+
 /**
  * Google Apps Script 版本的 HttpPost
  * @param {string} url - 目標網址
