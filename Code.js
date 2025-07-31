@@ -16,6 +16,7 @@ Changelog:
 1.3.0  linchao: 新增寄信功能可以使用google doc做html 樣版
 1.4.0  linchao: 修正發票號碼改以"公司名稱"目錄下檔案,而不是Invoice Folder全部檔案
 1.4.1  linchao: 修正log:"app"->"App"
+1.4.2  linchao: 補上log缺少欄位,新増"invoice_num"欄位
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -238,7 +239,7 @@ function getAllPDFFilesByCompany(folder, filesMap) {
 function generateInvoice(bShowDialog = true) {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
-        var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
+        var dataSheet = ss.getActiveSheet(); // 取得目前 active sheet
         var settingsSheet = ss.getSheetByName(SETTINGS.sheetSettings);
 
         // --- Multi-Company Settings Loader ---
@@ -273,11 +274,12 @@ function generateInvoice(bShowDialog = true) {
         var pdfHeadNameIndex = dataHeader.indexOf(SETTINGS.pdfFileHead);
         var dataCompanyNameIndex = dataHeader.indexOf("公司名稱");
         var dateIndex = dataHeader.indexOf("invoice date");
-        // 不再讀取 Invoice Number 欄位
-
+        var invoice_numIndex = dataHeader.indexOf("invoice_num");
+        
         if (dataCompanyNameIndex === -1) throw new Error("The 'Data' sheet must contain a '公司名稱' column.");
         if (dateIndex === -1) throw new Error("The 'Data' sheet must contain a 'date' column.");
-        // 不再檢查 Invoice Number 欄位
+        // 檢查 Invoice Number 欄位
+        if (invoice_numIndex === -1) throw new Error("The 'Data' sheet must contain a 'invoice_num' column.");
 
         var key, values, pdfName, invoiceNumber, invoiceDateStr;
 
@@ -400,7 +402,8 @@ function generateInvoice(bShowDialog = true) {
                 }
 
                 replace('%invoice%', invoiceNumber, docBody);
-
+                rowData[invoice_numIndex] = invoiceNumber; // 更新 rowData 以便寫入 log
+                dataSheet.getRange(i + 1, invoice_numIndex + 1).setValue(invoiceNumber);
                 pdfName = rowData[pdfHeadNameIndex] + " " + invoiceNumber;
                 DocumentApp.openById(invoiceId).setName(pdfName).saveAndClose();
 
@@ -476,6 +479,15 @@ function writeLogSheet(source, rowJson) {
     }
     // 取得標題
     var headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+    // 檢查是否有缺少的欄位，若有則自動補上
+    var missingCols = keys.filter(function(k) { return headers.indexOf(k) === -1; });
+    if (missingCols.length > 0) {
+        logSheet.insertColumnsAfter(logSheet.getLastColumn(), missingCols.length);
+        for (var i = 0; i < missingCols.length; i++) {
+            logSheet.getRange(1, headers.length + 1 + i).setValue(missingCols[i]);
+        }
+        headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+    }
     var row = [now, source];
     for (var i = 2; i < headers.length; i++) {
         row.push(rowJson[headers[i]] || '');
