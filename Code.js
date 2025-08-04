@@ -19,6 +19,7 @@ Changelog:
 1.4.2  linchao: 補上log缺少欄位,新増"invoice_num"欄位
 1.4.3  linchao: 檢查開立發票時，工作表名稱 yyyy/mm 格式，例如 2025/07 且目前時間大於工作表名稱指定的年/月,超過"關帳期限"。
 1.4.4  linchao: 增加"Credit Note"填入需作廢或拆讓的 Invoice_num,需在settings中設定 樣版"CreditNote URL",Invoice同層會建立"Credit Note"相同階層目錄結構。
+1.4.5  linchao: 超過'關帳期限'改為"警告"不再禁止
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -363,7 +364,7 @@ function generateInvoice(bShowDialog = true) {
                     }
                     // 若目前年/月 > sheet 年/月 也報錯
                     if (currentYear > sheetYear || (currentYear === sheetYear && currentMonth > sheetMonth)) {
-                        throw new Error(`Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 目前時間大於工作表名稱:sheetName 指定的年/月,超過"關帳期限"。`);
+                        showUiDialog("警告! 超過'關帳期限'",`Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 目前時間大於工作表名稱:sheetName 指定的年/月,超過"關帳期限"。`);
                     }
                 }                
                 // 產生 yyyymmdd key
