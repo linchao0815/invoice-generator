@@ -20,6 +20,7 @@ Changelog:
 1.4.3  linchao: 檢查開立發票時，工作表名稱 yyyy/mm 格式，例如 2025/07 且目前時間大於工作表名稱指定的年/月,超過"關帳期限"。
 1.4.4  linchao: 增加"Credit Note"填入需作廢或拆讓的 Invoice_num,需在settings中設定 樣版"CreditNote URL",Invoice同層會建立"Credit Note"相同階層目錄結構。
 1.4.5  linchao: 超過'關帳期限'改為"警告"不再禁止
+1.4.6  linchao: 修正寄信錯誤,因應sheet名稱變更
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
@@ -572,7 +573,7 @@ function writeLogSheet(source, rowJson) {
 function sendEmail() {
     try {
         var ss = SpreadsheetApp.getActiveSpreadsheet();
-        var dataSheet = ss.getSheetByName(SETTINGS.sheetName);
+        var dataSheet = ss.getActiveSheet(); // 取得目前 active sheet
         var settingsSheet = ss.getSheetByName(SETTINGS.sheetSettings);
 
         // 載入 Settings
