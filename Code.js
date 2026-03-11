@@ -21,10 +21,11 @@ Changelog:
 1.4.4  linchao: 增加"Credit Note"填入需作廢或拆讓的 Invoice_num,需在settings中設定 樣版"CreditNote URL",Invoice同層會建立"Credit Note"相同階層目錄結構。
 1.4.5  linchao: 超過'關帳期限'改為"警告"不再禁止
 1.4.6  linchao: 修正寄信錯誤,因應sheet名稱變更
+1.4.7  linchao: 修正writeLogSheet保護中的log sheet列數已滿無法寫入問題,保護移除前移至所有寫入操作之前,加入try/finally確保保護必定恢復,新增testWriteLogSheet測試函式
 *================================================================================================================*/
 let logUrl = "https://script.google.com/macros/s/AKfycbykmOscH010Putq3c8dhCYaAxxOCrLIqTfz8K50ZQTROcbWWdNgtX4Ux3aNDTo2FBxU/exec";
 function ElkLog(msg) {
-    let userName = "",domain="";
+    let userName = "", domain = "";
     try {
         let acnt = Session.getActiveUser().getEmail();
         if (acnt.indexOf('@') > -1) {
@@ -33,7 +34,7 @@ function ElkLog(msg) {
         }
     } catch (e) { }
     let payload = Object.assign({ "App": "invoice", "Domain": domain }, msg);
-    payload["UserName"]=userName;
+    payload["UserName"] = userName;
     // 遍歷 val 物件的所有屬性
     for (var key in msg) {
         // 檢查屬性名稱是否包含 'date' (不區分大小寫)
@@ -74,7 +75,8 @@ var msg = {
     'PDF Url': 'https://drive.google.com/file/d/14jElMsj7Q36aKvo1iBhEHrO5sf9C9dTb/view?usp=drivesdk',
     'Attachment Url': '',
     'Email Sent Status': '2025-06-23 16:34:32',
-    'invoice date': '2025-06-23'
+    'invoice date': '2025-06-23',
+    'invoice_num': '20250623001'
 }
 
 function testLog() {
@@ -201,7 +203,7 @@ function createSystem() {
         showUiDialog('Success', 'The main folder structure is ready. You can now add companies to the Settings sheet.');
         return true;
     } catch (e) {
-        showUiDialog('Something went wrong'+ e.message+" Stack Trace: " + e.stack);
+        showUiDialog('Something went wrong' + e.message + " Stack Trace: " + e.stack);
     }
 }
 
@@ -312,7 +314,7 @@ function generateInvoice(bShowDialog = true) {
             throw new Error('Instructions C15 的 Invoice Folder URL 格式錯誤。');
         }
         var { rootFolder: rootInvoicesFolder, maxCounterMap: maxInvoicesCounterMap } = getFolderInfo(folderIdMatch, "Invoices");
-        var { rootFolder: rootCreditNoteFolder, maxCounterMap: maxCreditNoteCounterMap } = getFolderInfo(folderIdMatch,"Credit Note");
+        var { rootFolder: rootCreditNoteFolder, maxCounterMap: maxCreditNoteCounterMap } = getFolderInfo(folderIdMatch, "Credit Note");
         for (var i = 1; i < sheetValues.length; i++) {
             var rowData = sheetValues[i];
             var currentCompanyName = rowData[dataCompanyNameIndex];
@@ -324,9 +326,9 @@ function generateInvoice(bShowDialog = true) {
                     showUiDialog("錯誤", "公司「" + currentCompanyName + "」的 Template URL 尚未設定，請先於 Settings 工作表補齊。");
                     continue;
                 }
-                var targetFolderId=companySettings.folderId;
+                var targetFolderId = companySettings.folderId;
                 var targetFolderIdColIdx = folderIdColIdx;
-                var rootHandleFolder=rootInvoicesFolder,maxCounterMap=maxInvoicesCounterMap;
+                var rootHandleFolder = rootInvoicesFolder, maxCounterMap = maxInvoicesCounterMap;
                 var isCreditNote = false;
                 if (creditNoteColIdx !== -1 && rowData[creditNoteColIdx] && rowData[creditNoteColIdx].toString().length > 0) {
                     rootHandleFolder = rootCreditNoteFolder;
@@ -339,7 +341,7 @@ function generateInvoice(bShowDialog = true) {
                 if (!targetFolderId) {
                     // 先檢查是否已存在同名公司資料夾
                     targetFolderId = createOrRetrieveFolder(rootHandleFolder, currentCompanyName, targetFolderId, settingsSheet, companySettings, targetFolderIdColIdx);
-                    if(isCreditNote) {
+                    if (isCreditNote) {
                         companySettings.creditNoteFolderId = targetFolderId;
                     } else {
                         companySettings.folderId = targetFolderId;
@@ -358,7 +360,7 @@ function generateInvoice(bShowDialog = true) {
                 if (sheetYearMonth.length === 2) {
                     var now = new Date();
                     var currentYear = now.getFullYear();
-                    var currentMonth = now.getMonth() + 1;                
+                    var currentMonth = now.getMonth() + 1;
                     var sheetYear = parseInt(sheetYearMonth[0], 10);
                     var sheetMonth = parseInt(sheetYearMonth[1], 10);
                     if (invoiceYear !== sheetYear || invoiceMonth !== sheetMonth) {
@@ -366,9 +368,9 @@ function generateInvoice(bShowDialog = true) {
                     }
                     // 若目前年/月 > sheet 年/月 也報錯
                     if (currentYear > sheetYear || (currentYear === sheetYear && currentMonth > sheetMonth)) {
-                        showUiDialog("警告! 超過'關帳期限'",`Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 目前時間大於工作表名稱:sheetName 指定的年/月,超過"關帳期限"。`);
+                        showUiDialog("警告! 超過'關帳期限'", `Skipping Row ${i + 1} "invoice date":${rowData[dateIndex]} 目前時間大於工作表名稱:sheetName 指定的年/月,超過"關帳期限"。`);
                     }
-                }                
+                }
                 // 產生 yyyymmdd key
                 var yyyymmddKey = Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), "yyyyMMdd");
                 // 取得本公司本次日期的最大流水號
@@ -530,44 +532,70 @@ function writeLogSheet(source, rowJson) {
     var logSheet = ss.getSheetByName('log');
     if (!logSheet) {
         logSheet = ss.insertSheet('log');
-        var protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
-        protection.removeEditors(protection.getEditors());
     }
     var now = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
     var keys = Object.keys(rowJson);
-    // 若 log sheet 無標題，寫入標題
-    if (logSheet.getLastRow() === 0 || logSheet.getLastColumn() === 0) {
-        logSheet.appendRow(['time', 'source'].concat(keys));
-    }
-    // 取得標題
-    var headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
-    // 檢查是否有缺少的欄位，若有則自動補上
-    var missingCols = keys.filter(function(k) { return headers.indexOf(k) === -1; });
-    if (missingCols.length > 0) {
-        logSheet.insertColumnsAfter(logSheet.getLastColumn(), missingCols.length);
-        for (var i = 0; i < missingCols.length; i++) {
-            logSheet.getRange(1, headers.length + 1 + i).setValue(missingCols[i]);
+
+    // ★ 嘗試移除所有保護（SHEET + RANGE），若無權限則跳過
+    var allTypes = [SpreadsheetApp.ProtectionType.SHEET, SpreadsheetApp.ProtectionType.RANGE];
+    for (var t = 0; t < allTypes.length; t++) {
+        try {
+            var protections = logSheet.getProtections(allTypes[t]);
+            for (var p = 0; p < protections.length; p++) {
+                try { protections[p].remove(); } catch (e) {
+                    console.log('writeLogSheet: 無法移除保護: ' + e.message);
+                }
+            }
+        } catch (e) {
+            console.log('writeLogSheet: 無法讀取保護: ' + e.message);
         }
-        headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
     }
-    var row = [now, source];
-    for (var i = 2; i < headers.length; i++) {
-        row.push(rowJson[headers[i]] || '');
+
+    try {
+        // 若 log sheet 無標題，寫入標題
+        if (logSheet.getLastRow() === 0 || logSheet.getLastColumn() === 0) {
+            logSheet.appendRow(['time', 'source'].concat(keys));
+        }
+        // 取得標題
+        var headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+        // 檢查是否有缺少的欄位，若有則自動補上
+        var missingCols = keys.filter(function (k) { return headers.indexOf(k) === -1; });
+        if (missingCols.length > 0) {
+            logSheet.insertColumnsAfter(logSheet.getLastColumn(), missingCols.length);
+            for (var i = 0; i < missingCols.length; i++) {
+                logSheet.getRange(1, headers.length + 1 + i).setValue(missingCols[i]);
+            }
+            headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+        }
+        var row = [now, source];
+        for (var i = 2; i < headers.length; i++) {
+            row.push(rowJson[headers[i]] || '');
+        }
+        // 若目前列數已滿（maxRows <= lastRow），先插入新列以確保 appendRow 有空間寫入
+        var maxRows = logSheet.getMaxRows();
+        var lastRow = logSheet.getLastRow();
+        if (maxRows <= lastRow) {
+            logSheet.insertRowsAfter(maxRows, 1);
+        }
+        logSheet.appendRow(row);
+    } finally {
+        // ★ 恢復保護（警告模式），避免非擁有者被鎖死
+        try {
+            var newProtection = logSheet.protect().setDescription('log sheet 保護');
+            newProtection.setWarningOnly(true);
+        } catch (e) {
+            console.log('writeLogSheet: 恢復保護失敗: ' + e.message);
+        }
     }
-    // 解除保護
-    var protections = logSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
-    var protection = protections.length > 0 ? protections[0] : null;
-    if (protection) protection.remove();
-    logSheet.appendRow(row);
-    rowJson['kind'] = source;
-    ElkLog(rowJson);
-    // 再加回保護
-    if (!protection) {
-        protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
-    } else {
-        protection = logSheet.protect().setDescription('log sheet 保護').setWarningOnly(false);
-    }
-    protection.removeEditors(protection.getEditors());
+    // ElkLog 放在保護恢復之後，使用副本避免修改呼叫端的 rowJson
+    var elkPayload = Object.assign({}, rowJson, { kind: source });
+    ElkLog(elkPayload);
+}
+
+// 測試 writeLogSheet 函式
+function testWriteLogSheet() {
+    writeLogSheet('testWriteLogSheet', msg);
+    Logger.log('testWriteLogSheet done');
 }
 
 // 依據規格新增 sendEmail 功能
@@ -813,7 +841,7 @@ function convertPDF(id, folderId) {
         var doc = DocumentApp.openById(id);
         var docBlob = doc.getAs('application/pdf');
         docBlob.setName(doc.getName() + ".pdf");
-        
+
         // 偵錯：檢查目標資料夾是否存在且可存取
         var folder = DriveApp.getFolderById(folderId);
         Logger.log("Successfully accessed folder: " + folder.getName());
@@ -822,7 +850,7 @@ function convertPDF(id, folderId) {
         var file = folder.createFile(docBlob);
         var url = file.getUrl();
         var fileId = file.getId();
-        
+
         Logger.log("File created successfully. URL: " + url);
         return [url, fileId];
 
@@ -832,7 +860,7 @@ function convertPDF(id, folderId) {
         Logger.log("Error Name: " + e.name);
         Logger.log("Error Message: " + e.message);
         Logger.log("Stack Trace: " + e.stack);
-        
+
         // 將錯誤訊息拋出，讓呼叫方知道失敗了
         throw new Error("Failed to create PDF. " + e.toString());
     }
