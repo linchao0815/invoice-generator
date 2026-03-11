@@ -334,6 +334,7 @@ function generateInvoice(bShowDialog = true) {
                     isCreditNote = true;
                     targetFolderId = companySettings.creditNoteFolderId;
                     targetFolderIdColIdx = creditNoteFolderColIdx;
+                    console.log("DEBUG: Row", i + 1, `Credit Note:'${rowData[creditNoteColIdx].toString()}'is Credit Note:`, isCreditNote, "targetFolderId:", targetFolderId);
                 }
                 if (!targetFolderId) {
                     // 先檢查是否已存在同名公司資料夾
