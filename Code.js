@@ -126,6 +126,7 @@ function onOpen() {
         .addItem('產生發票', 'generateInvoice')
         .addItem('Send Emails', 'sendEmail')
         .addItem('產生並寄送發票', 'generateAndSendInvoice')
+        .addItem('讀取客戶資料', 'readClientData')
         .addToUi();
 }
 
