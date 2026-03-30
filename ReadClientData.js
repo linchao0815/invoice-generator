@@ -1,7 +1,7 @@
 /*================================================================================================================*
   ReadClientData - 從 Attachment Url 讀取外部 Google Sheet 資料
   ================================================================================================================
-  Version:      1.1.0
+  Version:      1.0.0
   Description:  根據「客戶表」工作表中 TableClient 表格的設定，讀取 Attachment Url 指向的外部檔案
                 (支援原生 Google Sheets 及 .xlsx)，搜尋指定欄位的值並回填至目前月份工作表。
 
@@ -9,9 +9,7 @@
   - 需啟用 Drive Advanced Service (Apps Script 編輯器 → 服務 → Drive API)
 
   Changelog:
-  1.1.0  支援 .xlsx 檔案自動轉檔、MIME type 判斷取代 try-catch、精簡 log 輸出、
-         OK log 顯示來源明細、WARNING 提示有設定但查無結果的欄位
-  1.0.0  初始版本：讀取 TableClient 設定，自動從外部 Sheet 查找並回填數值
+  1.0.0  初始版本：讀取 TableClient 設定，從外部 Sheet/xlsx 查找並回填數值
 
   TableClient 欄位：
     客戶平台 | client_name | 公司名稱 | client_email | client_address | receive_acnt | 幣別 | WHT/VAT
