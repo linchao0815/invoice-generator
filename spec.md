@@ -17,6 +17,14 @@
 | 1.4.4 | 增加 Credit Note 填入需作廢或折讓的 Invoice_num，需在 Settings 設定「CreditNote URL」樣版 |
 | 1.4.5 | 超過「關帳期限」改為「警告」不再禁止 |
 | 1.4.6 | 修正寄信錯誤，因應 sheet 名稱變更 |
+| 1.4.7 | 修正writeLogSheet保護中的log sheet列數已滿無法寫入問題 |
+
+### ReadClientData 版本歷程
+
+| 版本 | 說明 |
+|------|------|
+| 1.0.0 | 初始版本：讀取 TableClient 設定，從外部 Sheet/xlsx 查找並回填數值 |
+| 1.1.0 | 新增 url 指令：從 TableClient 標題以 `\|` 分隔定義，支援從指定欄位的 URL 開啟外部檔案查找數值 |
 
 ## 1. 總體架構分析
 
@@ -361,3 +369,162 @@ graph TD
     M --> C;
     C --> N[結束];
 ```
+
+
+## 9. ReadClientData 功能 (`ReadClientData.js`)
+
+### 概述
+
+`ReadClientData` 負責從外部 Google Sheet/xlsx 檔案讀取數值並回填至當前 yyyy/mm 工作表。它根據「客戶表」(TableClient) 中的設定，自動查找指定工作表中的關鍵字並取得對應數值。
+
+### 前置需求
+
+- 需啟用 Drive Advanced Service (Apps Script 編輯器 → 服務 → Drive API)
+
+### TableClient 欄位結構
+
+「客戶表」工作表以「客戶平台」為 key，每列定義一個客戶的設定：
+
+| 欄位名稱 | 說明 |
+|----------|------|
+| `客戶平台` | 客戶識別名稱（與 yyyy/mm 工作表對應） |
+| `client_name` | 客戶名稱 |
+| `公司名稱` | 公司名稱 |
+| `client_email` | 客戶 Email |
+| `client_address` | 客戶地址 |
+| `receive_acnt` | 收款帳號 |
+| `幣別` | 幣別 |
+| `WHT/VAT` | 稅率設定 |
+| `sheet_input1` | 主要查找的工作表名稱 |
+| `input1` | 主要搜尋關鍵字 |
+| `sheet_input1\|add\|N` | add 指令：額外查找的工作表名稱 (N=1~3) |
+| `input1\|add\|N` | add 指令：額外搜尋關鍵字 (N=1~3) |
+| `sheet_<target>` | url 指令：外部檔案的工作表名稱（獨立欄位，不含 `\|`） |
+| `<target>\|url\|<url_col>` | url 指令：搜尋關鍵字；`<target>` 為目標欄位，`<url_col>` 為 URL 來源欄位 |
+
+### 指令類型
+
+#### 主要查找 (sheet_input1 + input1)
+
+從 Attachment Url 指向的外部檔案中，在 `sheet_input1` 指定的工作表搜尋 `input1` 指定的關鍵字，取得同列後方第一個非空值。
+
+#### add 指令 (sheet_input1|add|N + input1|add|N)
+
+從**同一份** Attachment Url 檔案的不同工作表/關鍵字讀取額外數值，加總至 `input1` 欄位。最多支援 3 組 (N=1~3)。
+
+#### url 指令 (sheet_\<target\> + \<target\>|url|\<url_col\>)
+
+從 yyyy/mm 工作表中**指定欄位**的 URL 開啟**另一份**外部檔案查找數值，結果寫入**指定的目標欄位**。
+
+**標題命名規則：**
+
+url 指令由兩個 TableClient 欄位組成：
+
+1. `sheet_<target>` — 獨立欄位（不含 `|`），值為外部檔案的工作表名稱
+2. `<target>|url|<url_col>` — 以 `|` 分隔的欄位，值為搜尋關鍵字
+
+其中：
+- `<target>` = yyyy/mm 工作表中要寫入結果的目標欄位名稱
+- `url` = 指令類型標記
+- `<url_col>` = yyyy/mm 工作表中包含外部檔案 URL 的欄位名稱
+
+**配對規則：** `<target>|url|<url_col>` 標題 split 後第 1 段為 `<target>`，系統自動尋找名為 `sheet_<target>` 的獨立欄位作為工作表名稱來源。
+
+**範例：**
+
+TableClient 標題：`sheet_reference`（獨立欄位）和 `reference|url|reference_url`
+
+| TableClient 標題 | 儲存格值（範例） | 說明 |
+|-----------------|-----------------|------|
+| `sheet_reference` | `Total Report` | 外部檔案中的工作表名稱 |
+| `reference\|url\|reference_url` | `Accumulated profit (EUR)` | 搜尋關鍵字 |
+
+yyyy/mm 工作表需有 `reference` 和 `reference_url` 兩個欄位。
+
+執行流程：
+1. 從當前列的 `reference_url` 欄位讀取 URL
+2. 開啟該 URL 指向的外部檔案
+3. 在 `Total Report` 工作表中搜尋 `Accumulated profit (EUR)`
+4. 取得同列後方第一個非空值
+5. 結果加總至當前列的 `reference` 欄位
+
+### `readClientData()` 函式流程圖
+
+```mermaid
+graph TD
+    A[開始] --> B{檢查工作表名稱格式 yyyy/mm};
+    B -->|格式錯誤| C[顯示錯誤並結束];
+    B -->|格式正確| D[讀取 TableClient 建立 clientMap];
+    D --> E[讀取當前工作表資料];
+    E --> F[迴圈處理每一列];
+    F --> G{有客戶平台?};
+    G -->|否| F;
+    G -->|是| H{clientMap 有此客戶?};
+    H -->|否| I[記錄 SKIP 並繼續];
+    H -->|是| J{有 Attachment Url?};
+    J -->|是| K[開啟外部檔案 帶快取];
+    K --> L[查找主要值 sheet_input1 + input1];
+    L --> M[處理 add 指令 1~3];
+    M --> N[回填 input1 欄位];
+    J -->|否| O[跳過主要值處理];
+    N --> P[處理 url 指令];
+    O --> P;
+    P --> Q{有 url 指令?};
+    Q -->|否| F;
+    Q -->|是| R[解析 url 指令組];
+    R --> S[從 url_source_column 讀取 URL];
+    S --> T[開啟外部檔案 帶快取];
+    T --> U[lookupValueInSheet 查找數值];
+    U --> V[加總至 target_column];
+    V --> F;
+    F --> W[顯示完成對話框];
+```
+
+### 函式說明
+
+#### `readClientData()`
+- **目的**: 主函式，遍歷當前 yyyy/mm 工作表，根據 TableClient 設定從外部檔案查找數值並回填。
+- **處理順序**: 主要值 → add 指令 → url 指令
+
+#### `getTableClientMap(ss)`
+- **目的**: 讀取「客戶表」工作表，以「客戶平台」為 key 建立設定 map。
+- **回傳**: `{ "客戶平台名稱": { header: value, ... } }`
+
+#### `parseUrlDirectives_(clientConfig)`
+- **目的**: 從 clientConfig 的 key（TableClient 標題）中解析所有 url 指令組。
+- **邏輯**: 掃描所有 key，以 `|` split，若第 2 段為 `url` 則識別為 url 指令。第 1 段為目標欄位名稱，第 3 段為 URL 來源欄位。sheet 名稱從獨立的 `sheet_<target>` 欄位取得。
+- **回傳**: `[{ targetCol, urlSourceCol, sheetName, searchKey }, ...]`
+
+#### `processUrlDirectives_(urlDirectives, clientConfig, rowData, dataHeader, dataSheet, rowIndex, clientPlatform, fileCache)`
+- **目的**: 處理所有 url 指令組，開啟外部檔案、查找數值、加總並寫入目標欄位。
+- **特性**:
+  - 使用共用 fileCache 快取機制
+  - 支援 .xlsx 自動轉檔
+  - 多組指向相同目標欄位時自動加總
+  - 結果加總至目標欄位的現有值
+
+#### `lookupValueInSheet(externalSS, sheetName, searchKey)`
+- **目的**: 在外部 Google Sheet 的指定工作表中搜尋關鍵字，取得同列後方第一個非空值。
+- **回傳**: 找到的值，或 `null`
+
+#### `extractFileIdFromUrl(url)`
+- **目的**: 從 Google Drive/Sheet URL 中提取檔案 ID。
+- **回傳**: 檔案 ID 字串，或 `null`
+
+#### `cleanupTempFile_(tempFileId)`
+- **目的**: 清理 .xlsx 轉檔產生的暫存 Google Sheets 副本（移至垃圾桶）。
+
+### 快取機制
+
+`fileCache` 物件以檔案 ID 為 key，快取已開啟的 Spreadsheet 物件。同一次執行中，無論是 Attachment Url、add 指令或 url 指令，只要指向相同檔案 ID 就會共用快取，避免重複開檔或轉檔。
+
+### 日誌格式
+
+| 等級 | 格式 | 說明 |
+|------|------|------|
+| OK | `Row N [平台] OK: value (sources)` | 主要值+add 成功 |
+| url OK | `Row N [平台] url OK: target += value (src)` | url 指令查找成功 |
+| url WRITE | `Row N [平台] url WRITE: col = old + delta = new (sources)` | url 指令寫入結果 |
+| WARNING | `Row N [平台] WARNING/url WARNING: ...` | 找不到關鍵字 |
+| ERROR | `Row N ERROR/url ERROR: ...` | 無法開啟檔案 |
+| SKIP | `Row N SKIP/url SKIP: ...` | 缺少設定或欄位 |

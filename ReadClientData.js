@@ -1,7 +1,7 @@
 /*================================================================================================================*
   ReadClientData - 從 Attachment Url 讀取外部 Google Sheet 資料
   ================================================================================================================
-  Version:      1.0.0
+  Version:      1.1.0
   Description:  根據「客戶表」工作表中 TableClient 表格的設定，讀取 Attachment Url 指向的外部檔案
                 (支援原生 Google Sheets 及 .xlsx)，搜尋指定欄位的值並回填至目前月份工作表。
 
@@ -10,11 +10,19 @@
 
   Changelog:
   1.0.0  初始版本：讀取 TableClient 設定，從外部 Sheet/xlsx 查找並回填數值
+  1.1.0  新增 url 指令：從 TableClient 標題以 | 分隔定義，支援從指定欄位的 URL 開啟外部檔案查找數值
 
   TableClient 欄位：
     客戶平台 | client_name | 公司名稱 | client_email | client_address | receive_acnt | 幣別 | WHT/VAT
     sheet_input1 | input1 | sheet_input1|add|1 | input1|add|1 | sheet_input1|add|2 | input1|add|2
     sheet_input1|add|3 | input1|add|3
+
+  url 指令欄位格式（標題以 | 分隔）：
+    sheet_<target>|url|<url_col>  → 值為外部檔案的工作表名稱
+    <target>|url|<url_col>        → 值為搜尋關鍵字；<target> 為 yyyy/mm 工作表的目標欄位；<url_col> 為包含 URL 的欄位
+  範例：
+    sheet_input1|url|Att2 Url | input1|url|Att2 Url
+    → 從當前列 "Att2 Url" 欄位取 URL，開啟外部檔案，在指定 sheet 搜尋關鍵字，結果加總至 "input1" 欄位
 *================================================================================================================*/
 
 /**
@@ -79,8 +87,8 @@ function readClientData() {
       var attUrl = rowData[attUrlIndex];
       var clientPlatform = rowData[clientPlatformIndex];
 
-      // 跳過沒有 Attachment Url 的列
-      if (!attUrl) {
+      // 跳過沒有客戶平台的列
+      if (!clientPlatform) {
         continue;
       }
 
@@ -92,97 +100,106 @@ function readClientData() {
         continue;
       }
 
-      // 取得 sheet_input1 和 input1 設定
-      var sheetInput1 = clientConfig["sheet_input1"];
-      var searchKey1 = clientConfig["input1"];
+      // === 處理主要值 (Attachment Url + sheet_input1 + input1 + add) ===
+      if (attUrl) {
+        // 取得 sheet_input1 和 input1 設定
+        var sheetInput1 = clientConfig["sheet_input1"];
+        var searchKey1 = clientConfig["input1"];
 
-      if (!sheetInput1 || !searchKey1) {
-        console.log("Row " + (i + 1) + " [" + clientPlatform + "] SKIP: 缺少 sheet_input1 或 input1 設定");
-        skippedCount++;
-        continue;
-      }
-
-      // 開啟 Attachment Url 指向的檔案 (支援 Google Sheets 及 .xlsx，帶快取)
-      var externalSS;
-      var tempFileId = null;
-      try {
-        var fileId = extractFileIdFromUrl(attUrl);
-        if (!fileId) {
-          console.log("Row " + (i + 1) + " SKIP: 無法從 Url 取得檔案 ID");
+        if (!sheetInput1 || !searchKey1) {
+          console.log("Row " + (i + 1) + " [" + clientPlatform + "] SKIP: 缺少 sheet_input1 或 input1 設定");
           skippedCount++;
-          continue;
-        }
-
-        // 查快取，避免重複開檔/轉檔
-        if (fileCache[fileId]) {
-          externalSS = fileCache[fileId];
         } else {
-          var driveFile = DriveApp.getFileById(fileId);
-          var mimeType = driveFile.getMimeType();
+          // 開啟 Attachment Url 指向的檔案 (支援 Google Sheets 及 .xlsx，帶快取)
+          var externalSS;
+          var tempFileId = null;
+          var attFileOpened = false;
+          try {
+            var fileId = extractFileIdFromUrl(attUrl);
+            if (!fileId) {
+              console.log("Row " + (i + 1) + " SKIP: 無法從 Url 取得檔案 ID");
+              skippedCount++;
+            } else {
+              // 查快取，避免重複開檔/轉檔
+              if (fileCache[fileId]) {
+                externalSS = fileCache[fileId];
+                attFileOpened = true;
+              } else {
+                var driveFile = DriveApp.getFileById(fileId);
+                var mimeType = driveFile.getMimeType();
 
-          if (mimeType === "application/vnd.google-apps.spreadsheet") {
-            externalSS = SpreadsheetApp.openById(fileId);
-          } else {
-            var copiedFile = Drive.Files.copy(
-              { title: "temp_readClient_" + fileId, mimeType: "application/vnd.google-apps.spreadsheet" },
-              fileId
-            );
-            tempFileId = copiedFile.id;
-            externalSS = SpreadsheetApp.openById(tempFileId);
+                if (mimeType === "application/vnd.google-apps.spreadsheet") {
+                  externalSS = SpreadsheetApp.openById(fileId);
+                } else {
+                  var copiedFile = Drive.Files.copy(
+                    { title: "temp_readClient_" + fileId, mimeType: "application/vnd.google-apps.spreadsheet" },
+                    fileId
+                  );
+                  tempFileId = copiedFile.id;
+                  externalSS = SpreadsheetApp.openById(tempFileId);
+                }
+                fileCache[fileId] = externalSS;
+                attFileOpened = true;
+              }
+            }
+          } catch (e) {
+            console.log("Row " + (i + 1) + " ERROR: 無法開啟外部檔案: " + e.message);
+            skippedCount++;
+            cleanupTempFile_(tempFileId);
           }
-          fileCache[fileId] = externalSS;
+
+          if (attFileOpened) {
+            // 查找主要值 (sheet_input1 + input1)
+            var mainValue = lookupValueInSheet(externalSS, sheetInput1, searchKey1);
+
+            if (mainValue === null) {
+              console.log("Row " + (i + 1) + " [" + clientPlatform + "] SKIP: 在 '" + sheetInput1 + "' 找不到 '" + searchKey1 + "'");
+              skippedCount++;
+            } else {
+              var parsed = parseFloat(mainValue);
+              var totalValue = isNaN(parsed) ? 0 : parsed;
+              var sources = sheetInput1 + "/" + searchKey1 + "=" + totalValue;
+
+              // 處理 add|1 ~ add|3 的額外值
+              for (var addIdx = 1; addIdx <= 3; addIdx++) {
+                var addSheetKey = "sheet_input1|add|" + addIdx;
+                var addInputKey = "input1|add|" + addIdx;
+
+                var addSheetName = clientConfig[addSheetKey];
+                var addSearchKey = clientConfig[addInputKey];
+
+                if (!addSheetName || !addSearchKey) {
+                  continue;
+                }
+
+                var addValue = lookupValueInSheet(externalSS, addSheetName, addSearchKey);
+                if (addValue !== null) {
+                  var parsedAdd = parseFloat(addValue);
+                  var parsedAddValue = isNaN(parsedAdd) ? 0 : parsedAdd;
+                  totalValue += parsedAddValue;
+                  sources += " + " + addSheetName + "/" + addSearchKey + "=" + parsedAddValue;
+                } else {
+                  console.log("Row " + (i + 1) + " [" + clientPlatform + "] WARNING: add|" + addIdx + " 在 '" + addSheetName + "' 找不到 '" + addSearchKey + "'");
+                }
+              }
+
+              // 回填 input1 欄位
+              dataSheet.getRange(i + 1, input1Index + 1).setValue(totalValue);
+              console.log("Row " + (i + 1) + " [" + clientPlatform + "] OK: " + totalValue + " (" + sources + ")");
+              updatedCount++;
+            }
+
+            // 清理暫存轉檔
+            cleanupTempFile_(tempFileId);
+          }
         }
-      } catch (e) {
-        console.log("Row " + (i + 1) + " ERROR: 無法開啟外部檔案: " + e.message);
-        skippedCount++;
-        cleanupTempFile_(tempFileId);
-        continue;
+      } // end if (attUrl)
+
+      // === 處理 url 指令（獨立於 Attachment Url）===
+      var urlDirectives = parseUrlDirectives_(clientConfig);
+      if (urlDirectives.length > 0) {
+        processUrlDirectives_(urlDirectives, clientConfig, rowData, dataHeader, dataSheet, i, clientPlatform, fileCache);
       }
-
-      // 查找主要值 (sheet_input1 + input1)
-      var mainValue = lookupValueInSheet(externalSS, sheetInput1, searchKey1);
-
-      if (mainValue === null) {
-        console.log("Row " + (i + 1) + " [" + clientPlatform + "] SKIP: 在 '" + sheetInput1 + "' 找不到 '" + searchKey1 + "'");
-        skippedCount++;
-        cleanupTempFile_(tempFileId);
-        continue;
-      }
-
-      var parsed = parseFloat(mainValue);
-      var totalValue = isNaN(parsed) ? 0 : parsed;
-      var sources = sheetInput1 + "/" + searchKey1 + "=" + totalValue;
-
-      // 處理 add|1 ~ add|3 的額外值
-      for (var addIdx = 1; addIdx <= 3; addIdx++) {
-        var addSheetKey = "sheet_input1|add|" + addIdx;
-        var addInputKey = "input1|add|" + addIdx;
-
-        var addSheetName = clientConfig[addSheetKey];
-        var addSearchKey = clientConfig[addInputKey];
-
-        if (!addSheetName || !addSearchKey) {
-          continue;
-        }
-
-        var addValue = lookupValueInSheet(externalSS, addSheetName, addSearchKey);
-        if (addValue !== null) {
-          var parsedAdd = parseFloat(addValue);
-          var parsedAddValue = isNaN(parsedAdd) ? 0 : parsedAdd;
-          totalValue += parsedAddValue;
-          sources += " + " + addSheetName + "/" + addSearchKey + "=" + parsedAddValue;
-        } else {
-          console.log("Row " + (i + 1) + " [" + clientPlatform + "] WARNING: add|" + addIdx + " 在 '" + addSheetName + "' 找不到 '" + addSearchKey + "'");
-        }
-      }
-
-      // 回填 input1 欄位
-      dataSheet.getRange(i + 1, input1Index + 1).setValue(totalValue);
-      console.log("Row " + (i + 1) + " [" + clientPlatform + "] OK: " + totalValue + " (" + sources + ")");
-      updatedCount++;
-
-      // 清理暫存轉檔
-      cleanupTempFile_(tempFileId);
     }
 
     console.log("readClientData END - 更新: " + updatedCount + ", 跳過: " + skippedCount);
@@ -213,7 +230,13 @@ function getTableClientMap(ss) {
   }
 
   var headers = data[0];
-  var clientPlatformIdx = headers.indexOf("客戶平台");
+  var clientPlatformIdx = -1;
+  for (var h = 0; h < headers.length; h++) {
+    if (headers[h] !== null && headers[h] !== undefined && headers[h].toString().trim() === "客戶平台") {
+      clientPlatformIdx = h;
+      break;
+    }
+  }
   if (clientPlatformIdx === -1) {
     console.log("ERROR: TableClient 找不到 '客戶平台' 欄位");
     return null;
@@ -226,10 +249,20 @@ function getTableClientMap(ss) {
 
     var config = {};
     for (var j = 0; j < headers.length; j++) {
-      config[headers[j]] = data[i][j];
+      var headerStr = headers[j] !== null && headers[j] !== undefined ? headers[j].toString().trim() : "";
+      if (headerStr) {
+        config[headerStr] = data[i][j];
+      }
     }
     map[platform] = config;
   }
+
+  // Debug: 印出含有 url 指令的標題
+  var urlHeaders = Object.keys(map[Object.keys(map)[0]] || {}).filter(function(h) { return h.indexOf("|") > -1 && h.indexOf("url") > -1; });
+  if (urlHeaders.length > 0) {
+    console.log("  [TableClient] url 指令標題: " + JSON.stringify(urlHeaders));
+  }
+
   return map;
 }
 
@@ -290,5 +323,180 @@ function cleanupTempFile_(tempFileId) {
     DriveApp.getFileById(tempFileId).setTrashed(true);
   } catch (e) {
     console.log("  WARNING: 清理暫存轉檔失敗: " + e.message);
+  }
+}
+
+/**
+ * 從 clientConfig 的 key（即 TableClient 標題）中解析所有 url 指令組。
+ * 標題格式：<target>|url|<url_col> 或 sheet_<target>|url|<url_col>
+ * 以 url_col 分組，每組包含 sheetName（來自 sheet_ 前綴標題的值）和 searchKey（來自無前綴標題的值）。
+ *
+ * @param {Object} clientConfig - 該客戶的 TableClient 設定（key=標題, value=儲存格值）
+ * @returns {Array} - url 指令組陣列，每個元素為 { targetCol, urlSourceCol, sheetName, searchKey }
+ */
+function parseUrlDirectives_(clientConfig) {
+  var groups = {}; // key = urlSourceCol, value = { targetCol, sheetName, searchKey }
+
+  var keys = Object.keys(clientConfig);
+  for (var k = 0; k < keys.length; k++) {
+    var header = keys[k];
+    var parts = header.split("|");
+    if (parts.length !== 3 || parts[1].trim() !== "url") {
+      continue;
+    }
+
+    var segment1 = parts[0].trim();
+    var urlSourceCol = parts[2].trim();
+
+    if (!urlSourceCol) continue;
+
+    // segment1 不應有 sheet_ 前綴（sheet 名稱由獨立的 sheet_<target> 欄位提供）
+    if (segment1.indexOf("sheet_") === 0) {
+      continue; // 跳過，不應出現此格式
+    }
+
+    if (!groups[urlSourceCol]) {
+      groups[urlSourceCol] = { targetCol: null, sheetName: null, searchKey: null, urlSourceCol: urlSourceCol };
+    }
+
+    // segment1 為目標欄位名稱，值為搜尋關鍵字
+    groups[urlSourceCol].targetCol = segment1;
+    groups[urlSourceCol].searchKey = clientConfig[header] ? clientConfig[header].toString() : "";
+
+    // sheet 名稱從獨立的 "sheet_<target>" 欄位取得
+    var sheetKey = "sheet_" + segment1;
+    if (clientConfig[sheetKey] !== undefined && clientConfig[sheetKey] !== null && clientConfig[sheetKey].toString().trim() !== "") {
+      groups[urlSourceCol].sheetName = clientConfig[sheetKey].toString().trim();
+    }
+  }
+
+  // 轉為陣列，過濾掉不完整的組
+  var result = [];
+  var groupKeys = Object.keys(groups);
+  for (var g = 0; g < groupKeys.length; g++) {
+    var group = groups[groupKeys[g]];
+    if (group.targetCol && group.sheetName && group.searchKey && group.urlSourceCol) {
+      result.push(group);
+    } else {
+      console.log("  [parseUrlDirectives] SKIP incomplete group: urlSourceCol='" + group.urlSourceCol + "' targetCol='" + group.targetCol + "' sheetName='" + group.sheetName + "' searchKey='" + group.searchKey + "'");
+    }
+  }
+  if (result.length > 0) {
+    console.log("  [parseUrlDirectives] 解析到 " + result.length + " 組 url 指令");
+  }
+  return result;
+}
+
+/**
+ * 處理所有 url 指令組：開啟外部檔案、查找數值、加總並寫入目標欄位。
+ *
+ * @param {Array} urlDirectives - parseUrlDirectives_ 回傳的指令組陣列
+ * @param {Object} clientConfig - 該客戶的 TableClient 設定
+ * @param {Array} rowData - 當前列的資料陣列
+ * @param {Array} dataHeader - yyyy/mm 工作表的標題列
+ * @param {Sheet} dataSheet - yyyy/mm 工作表物件
+ * @param {number} rowIndex - 當前列的 0-based index（sheetValues 中的 index）
+ * @param {string} clientPlatform - 客戶平台名稱（用於日誌）
+ * @param {Object} fileCache - 檔案快取物件
+ */
+function processUrlDirectives_(urlDirectives, clientConfig, rowData, dataHeader, dataSheet, rowIndex, clientPlatform, fileCache) {
+  // 依 targetCol 分組累計值
+  var targetAccum = {}; // { targetCol: { total: number, sources: string } }
+
+  for (var d = 0; d < urlDirectives.length; d++) {
+    var directive = urlDirectives[d];
+    var urlSourceCol = directive.urlSourceCol;
+    var targetCol = directive.targetCol;
+    var sheetName = directive.sheetName;
+    var searchKey = directive.searchKey;
+
+    // 從當前列取得 URL
+    var urlColIndex = dataHeader.indexOf(urlSourceCol);
+    if (urlColIndex === -1) {
+      console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url SKIP: yyyy/mm 工作表找不到欄位 '" + urlSourceCol + "'");
+      continue;
+    }
+
+    var urlValue = rowData[urlColIndex];
+    if (!urlValue) {
+      // 靜默跳過：該列此欄位無 URL
+      continue;
+    }
+
+    // 開啟外部檔案（帶快取）
+    var externalSS;
+    var tempFileId = null;
+    try {
+      var fileId = extractFileIdFromUrl(urlValue);
+      if (!fileId) {
+        console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url SKIP: 無法從 '" + urlSourceCol + "' 的 URL 取得檔案 ID");
+        continue;
+      }
+
+      if (fileCache[fileId]) {
+        externalSS = fileCache[fileId];
+      } else {
+        var driveFile = DriveApp.getFileById(fileId);
+        var mimeType = driveFile.getMimeType();
+
+        if (mimeType === "application/vnd.google-apps.spreadsheet") {
+          externalSS = SpreadsheetApp.openById(fileId);
+        } else {
+          var copiedFile = Drive.Files.copy(
+            { title: "temp_readClient_url_" + fileId, mimeType: "application/vnd.google-apps.spreadsheet" },
+            fileId
+          );
+          tempFileId = copiedFile.id;
+          externalSS = SpreadsheetApp.openById(tempFileId);
+        }
+        fileCache[fileId] = externalSS;
+      }
+    } catch (e) {
+      console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url ERROR: 無法開啟 '" + urlSourceCol + "' 的外部檔案: " + e.message);
+      cleanupTempFile_(tempFileId);
+      continue;
+    }
+
+    // 查找數值
+    var foundValue = lookupValueInSheet(externalSS, sheetName, searchKey);
+    if (foundValue === null) {
+      console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url WARNING: 在 '" + sheetName + "' 找不到 '" + searchKey + "' (來源: " + urlSourceCol + ")");
+      cleanupTempFile_(tempFileId);
+      continue;
+    }
+
+    var parsedValue = parseFloat(foundValue);
+    var numValue = isNaN(parsedValue) ? 0 : parsedValue;
+
+    // 累計至目標欄位
+    if (!targetAccum[targetCol]) {
+      targetAccum[targetCol] = { total: 0, sources: "" };
+    }
+    targetAccum[targetCol].total += numValue;
+    var srcLabel = urlSourceCol + ">" + sheetName + "/" + searchKey + "=" + numValue;
+    targetAccum[targetCol].sources += (targetAccum[targetCol].sources ? " + " : "") + srcLabel;
+
+    console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url OK: " + targetCol + " += " + numValue + " (" + srcLabel + ")");
+    cleanupTempFile_(tempFileId);
+  }
+
+  // 寫入各目標欄位
+  var targetCols = Object.keys(targetAccum);
+  for (var t = 0; t < targetCols.length; t++) {
+    var col = targetCols[t];
+    var colIndex = dataHeader.indexOf(col);
+    if (colIndex === -1) {
+      console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url ERROR: yyyy/mm 工作表找不到目標欄位 '" + col + "'");
+      continue;
+    }
+
+    // 讀取目前欄位的現有值，加總 url 指令的結果
+    var currentValue = dataSheet.getRange(rowIndex + 1, colIndex + 1).getValue();
+    var currentNum = parseFloat(currentValue);
+    if (isNaN(currentNum)) currentNum = 0;
+
+    var newValue = currentNum + targetAccum[col].total;
+    dataSheet.getRange(rowIndex + 1, colIndex + 1).setValue(newValue);
+    console.log("Row " + (rowIndex + 1) + " [" + clientPlatform + "] url WRITE: " + col + " = " + currentNum + " + " + targetAccum[col].total + " = " + newValue + " (" + targetAccum[col].sources + ")");
   }
 }
